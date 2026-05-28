@@ -3,6 +3,7 @@ add_library(disk_recover_business STATIC
     scan_manager.cpp
     multi_target_writer.cpp
     recover_manager.cpp
+    preview_manager.cpp
 )
 
 target_include_directories(disk_recover_business PUBLIC
@@ -14,4 +15,5 @@ target_link_libraries(disk_recover_business PUBLIC
     disk_recover_filesystem_raw
     disk_recover_common
     unofficial::sqlite3::sqlite3
+    windowscodecs
 )
