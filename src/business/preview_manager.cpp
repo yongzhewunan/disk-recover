@@ -2,9 +2,8 @@
 #include <wincodec.h>
 #include <algorithm>
 #include <cwctype>
-
-// Link with windowscodecs.lib
-#pragma comment(lib, "windowscodecs.lib")
+#include <objbase.h>
+#include <limits>
 
 namespace disk_recover::business {
 
@@ -23,6 +22,11 @@ static std::wstring ToLowerExtension(const std::wstring& ext) {
 }
 
 PreviewManager::PreviewManager() {
+    // Initialize COM for this thread
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (hr == S_OK || hr == S_FALSE) {
+        comInitialized_ = true;
+    }
     InitializeWIC();
 }
 
@@ -30,6 +34,10 @@ PreviewManager::~PreviewManager() {
     if (pWicFactory_) {
         pWicFactory_->Release();
         pWicFactory_ = nullptr;
+    }
+    if (comInitialized_) {
+        CoUninitialize();
+        comInitialized_ = false;
     }
 }
 
@@ -180,6 +188,13 @@ HBITMAP PreviewManager::CreateThumbnailFromData(
     // Ensure minimum size of 1x1
     if (scaledWidth < 1) scaledWidth = 1;
     if (scaledHeight < 1) scaledHeight = 1;
+
+    // Check for overflow before allocating bitmap buffer
+    if (scaledWidth > 65535 || scaledHeight > 65535 ||
+        static_cast<size_t>(scaledWidth) * static_cast<size_t>(scaledHeight) > std::numeric_limits<size_t>::max() / 4) {
+        OutputDebugStringW(L"[PreviewManager] Image dimensions too large\n");
+        goto cleanup;
+    }
 
     // Create scaler
     hr = pWicFactory_->CreateBitmapScaler(&pScaler);

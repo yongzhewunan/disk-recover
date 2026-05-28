@@ -34,12 +34,14 @@ public:
     );
 
     // Check if file type is supported for preview
-    static bool IsImageFile(const std::wstring& extension);
-    static bool IsVideoFile(const std::wstring& extension);
+    static bool IsImageFile(const std::wstring& extension) noexcept;
+    static bool IsVideoFile(const std::wstring& extension) noexcept;
 
 private:
     // WIC factory (created once, reused)
     IWICImagingFactory* pWicFactory_ = nullptr;
+    // Track if COM was initialized by us
+    bool comInitialized_ = false;
 
     bool InitializeWIC();
 };
