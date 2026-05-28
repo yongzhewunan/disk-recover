@@ -1,6 +1,8 @@
 add_library(disk_recover_business STATIC
     scan_cache_db.cpp
     scan_manager.cpp
+    multi_target_writer.cpp
+    recover_manager.cpp
 )
 
 target_include_directories(disk_recover_business PUBLIC
