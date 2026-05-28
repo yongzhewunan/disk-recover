@@ -1,0 +1,13 @@
+build/
+out/
+.vcpkg/
+vcpkg/
+vcpkg_installed/
+CMakeUserPresets.json
+*.obj
+*.exe
+*.lib
+*.pdb
+*.ilk
+.vscode/
+.idea/

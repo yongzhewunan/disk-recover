@@ -1,0 +1,10 @@
+{
+  "name": "disk-recover",
+  "version": "0.1.0",
+  "dependencies": [
+    "cli11",
+    "sqlite3",
+    "ffmpeg",
+    "gtest"
+  ]
+}
