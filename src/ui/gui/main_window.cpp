@@ -39,7 +39,7 @@ bool MainWindow::RegisterClass(HINSTANCE hInst) {
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszMenuName = nullptr;
+    wc.lpszMenuName = MAKEINTRESOURCE(IDR_MAINFRAME);
     wc.lpszClassName = CLASS_NAME;
     wc.hIconSm = LoadIcon(nullptr, IDI_APPLICATION);
 
@@ -80,9 +80,17 @@ bool MainWindow::Create(HINSTANCE hInst, int cmdShow) {
 
 void MainWindow::RunMessageLoop() {
     MSG msg;
+    HACCEL hAccel = LoadAcceleratorsW(hInst_, MAKEINTRESOURCE(IDR_MAINFRAME));
+
     while (GetMessageW(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        if (!hAccel || !TranslateAcceleratorW(hwnd_, hAccel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    if (hAccel) {
+        DestroyAcceleratorTable(hAccel);
     }
 }
 
@@ -112,7 +120,7 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
 
         case WM_COMMAND:
-            self->OnCommand(LOWORD(wParam), reinterpret_cast<HWND>(lParam));
+            self->OnCommand(LOWORD(wParam), HIWORD(wParam), reinterpret_cast<HWND>(lParam));
             return 0;
 
         case WM_NOTIFY:
