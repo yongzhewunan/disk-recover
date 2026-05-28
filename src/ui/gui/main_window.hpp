@@ -68,7 +68,7 @@ private:
     // Message handlers
     void OnCreate();
     void OnSize(int cx, int cy);
-    void OnCommand(int id, HWND hCtrl);
+    void OnCommand(int id, int notifyCode, HWND hCtrl);
     void OnDestroy();
     void OnNotify(LPNMHDR nmhdr);
 

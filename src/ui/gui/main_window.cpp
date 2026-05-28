@@ -237,7 +237,7 @@ void MainWindow::OnSize(int cx, int cy) {
     }
 }
 
-void MainWindow::OnCommand(int id, HWND hCtrl) {
+void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
     switch (id) {
         case IDC_SCAN_BTN:
             UpdateStatus(L"Scanning disk...");
@@ -261,14 +261,14 @@ void MainWindow::OnCommand(int id, HWND hCtrl) {
             break;
 
         case IDC_DISK_LIST:
-            if (HIWORD(GetCurrentMessage()->wParam) == CBN_SELCHANGE) {
+            if (notifyCode == CBN_SELCHANGE) {
                 // Disk selection changed - update partition list
                 // TODO: Query partitions for selected disk
             }
             break;
 
         case IDC_PARTITION_LIST:
-            if (HIWORD(GetCurrentMessage()->wParam) == CBN_SELCHANGE) {
+            if (notifyCode == CBN_SELCHANGE) {
                 // Partition selection changed
             }
             break;
@@ -293,30 +293,42 @@ void MainWindow::OnNotify(LPNMHDR nmhdr) {
 }
 
 HWND MainWindow::CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
-    return CreateWindowExW(
+    HWND hwnd = CreateWindowExW(
         0, L"STATIC", text,
         WS_VISIBLE | WS_CHILD | SS_LEFT,
         x, y, w, h,
         parent, nullptr, hInst_, nullptr
     );
+    if (!hwnd) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create label control\n");
+    }
+    return hwnd;
 }
 
 HWND MainWindow::CreateComboBox(HWND parent, int id, int x, int y, int w, int h) {
-    return CreateWindowExW(
+    HWND hwnd = CreateWindowExW(
         0, WC_COMBOBOX, L"",
         WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         x, y, w, h,
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
+    if (!hwnd) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create combo box control\n");
+    }
+    return hwnd;
 }
 
 HWND MainWindow::CreateButton(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h) {
-    return CreateWindowExW(
+    HWND hwnd = CreateWindowExW(
         0, L"BUTTON", text,
         WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
         x, y, w, h,
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
+    if (!hwnd) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create button control\n");
+    }
+    return hwnd;
 }
 
 HWND MainWindow::CreateListView(HWND parent, int id, int x, int y, int w, int h) {
@@ -328,6 +340,11 @@ HWND MainWindow::CreateListView(HWND parent, int id, int x, int y, int w, int h)
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
 
+    if (!hList) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create list view control\n");
+        return nullptr;
+    }
+
     // Set extended styles
     ListView_SetExtendedListViewStyle(hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
@@ -335,13 +352,17 @@ HWND MainWindow::CreateListView(HWND parent, int id, int x, int y, int w, int h)
 }
 
 HWND MainWindow::CreateStatic(HWND parent, int id, int x, int y, int w, int h) {
-    return CreateWindowExW(
+    HWND hwnd = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"STATIC", L"",
         WS_VISIBLE | WS_CHILD | SS_CENTER | SS_CENTERIMAGE,
         x, y, w, h,
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
+    if (!hwnd) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create static control\n");
+    }
+    return hwnd;
 }
 
 HWND MainWindow::CreateStatusBar(HWND parent, int id) {
@@ -352,6 +373,11 @@ HWND MainWindow::CreateStatusBar(HWND parent, int id) {
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
 
+    if (!hStatus) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create status bar\n");
+        return nullptr;
+    }
+
     // Create progress bar as child of status bar
     RECT rc;
     GetClientRect(hStatus, &rc);
@@ -361,6 +387,10 @@ HWND MainWindow::CreateStatusBar(HWND parent, int id) {
         rc.right - 200, 2, 180, 18,
         hStatus, reinterpret_cast<HMENU>(IDC_PROGRESSBAR), hInst_, nullptr
     );
+
+    if (!hProgressBar_) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create progress bar\n");
+    }
 
     return hStatus;
 }
