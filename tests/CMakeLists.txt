@@ -3,6 +3,7 @@ add_executable(disk_recover_tests
     disk_handle_test.cpp
     bad_sector_test.cpp
     file_signatures_test.cpp
+    signature_scanner_test.cpp
     ntfs_test.cpp
     fat_test.cpp
     exfat_test.cpp
