@@ -1,0 +1,93 @@
+// Microsoft Visual C++ generated resource script.
+//
+// disk-recover - Windows Disk Data Recovery Software
+
+#include "resource.h"
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#ifndef APSTUDIO_INVOKED
+#include "targetver.h"
+#endif
+#define APSTUDIO_HIDDEN_SYMBOLS
+#include "windows.h"
+#undef APSTUDIO_HIDDEN_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+#pragma code_page(1252)
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Icon
+//
+
+// Icon with lowest ID value placed first to ensure application icon
+// remains consistent on all systems.
+// Note: Add disk-recover.ico to this directory, or comment out the line below
+// IDR_MAINFRAME           ICON                    "disk-recover.ico"
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Menu
+//
+
+IDR_MAINFRAME MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Scan Disk",                IDM_SCAN
+        MENUITEM "&Recover Files",            IDM_RECOVER
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",                     IDM_EXIT
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About",                    IDM_ABOUT
+    END
+END
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Accelerator
+//
+
+IDR_MAINFRAME ACCELERATORS
+BEGIN
+    "S",            IDM_SCAN,           VIRTKEY, CONTROL, NOINVERT
+    "R",            IDM_RECOVER,        VIRTKEY, CONTROL, NOINVERT
+    VK_ESCAPE,      IDM_STOP,           VIRTKEY, NOINVERT
+END
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// String Table
+//
+
+STRINGTABLE
+BEGIN
+    IDR_MAINFRAME           "Disk Recover"
+    IDM_SCAN                "Scan the selected disk for recoverable files"
+    IDM_RECOVER             "Recover selected files"
+    IDM_EXIT                "Exit the application"
+    IDM_ABOUT               "About Disk Recover"
+    IDM_STOP                "Stop the current operation"
+END
+
+#endif    // English (United States) resources
+/////////////////////////////////////////////////////////////////////////////
+
+#ifndef APSTUDIO_INVOKED
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 3 resource.
+//
+
+/////////////////////////////////////////////////////////////////////////////
+#endif    // not APSTUDIO_INVOKED
