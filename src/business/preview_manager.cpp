@@ -191,7 +191,7 @@ HBITMAP PreviewManager::CreateThumbnailFromData(
 
     // Check for overflow before allocating bitmap buffer
     if (scaledWidth > 65535 || scaledHeight > 65535 ||
-        static_cast<size_t>(scaledWidth) * static_cast<size_t>(scaledHeight) > std::numeric_limits<size_t>::max() / 4) {
+        static_cast<size_t>(scaledWidth) * static_cast<size_t>(scaledHeight) > (std::numeric_limits<size_t>::max)() / 4) {
         OutputDebugStringW(L"[PreviewManager] Image dimensions too large\n");
         goto cleanup;
     }
@@ -260,7 +260,7 @@ cleanup:
     return hBitmap;
 }
 
-bool PreviewManager::IsImageFile(const std::wstring& extension) {
+bool PreviewManager::IsImageFile(const std::wstring& extension) noexcept {
     std::wstring ext = ToLowerExtension(extension);
 
     // WIC built-in supported formats
@@ -284,7 +284,7 @@ bool PreviewManager::IsImageFile(const std::wstring& extension) {
     return false;
 }
 
-bool PreviewManager::IsVideoFile(const std::wstring& extension) {
+bool PreviewManager::IsVideoFile(const std::wstring& extension) noexcept {
     std::wstring ext = ToLowerExtension(extension);
 
     // Common video formats (not supported by WIC for thumbnails)
