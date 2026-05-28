@@ -1,0 +1,5 @@
+add_library(disk_recover_filesystem_ntfs STATIC
+    mft_parser.cpp
+)
+target_include_directories(disk_recover_filesystem_ntfs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(disk_recover_filesystem_ntfs PUBLIC disk_recover_disk_io)
