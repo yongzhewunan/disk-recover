@@ -7,8 +7,10 @@ add_executable(disk_recover_tests
     ntfs_test.cpp
     fat_test.cpp
     exfat_test.cpp
+    scan_cache_db_test.cpp
 )
 target_link_libraries(disk_recover_tests PRIVATE
+    disk_recover_business
     disk_recover_disk_io
     disk_recover_filesystem_raw
     disk_recover_filesystem_ntfs
