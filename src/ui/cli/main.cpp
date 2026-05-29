@@ -17,8 +17,81 @@
 #include <csignal>
 #include <gdiplus.h>
 #include <memory>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
 
 using namespace disk_recover;
+
+// Wildcard matching helper function
+// Supports: * matches any sequence, ? matches single character
+// Case insensitive for Windows filenames
+static bool wildcard_match(const std::wstring& text, const std::wstring& pattern) {
+    size_t text_len = text.length();
+    size_t pattern_len = pattern.length();
+
+    // Convert to lowercase for case-insensitive matching
+    std::wstring text_lower = text;
+    std::wstring pattern_lower = pattern;
+    std::transform(text_lower.begin(), text_lower.end(), text_lower.begin(), ::towlower);
+    std::transform(pattern_lower.begin(), pattern_lower.end(), pattern_lower.begin(), ::towlower);
+
+    // Dynamic programming approach for wildcard matching
+    std::vector<std::vector<bool>> dp(text_len + 1, std::vector<bool>(pattern_len + 1, false));
+
+    dp[0][0] = true;  // Empty pattern matches empty text
+
+    // Handle patterns starting with *
+    for (size_t j = 1; j <= pattern_len; ++j) {
+        if (pattern_lower[j - 1] == L'*') {
+            dp[0][j] = dp[0][j - 1];
+        }
+    }
+
+    for (size_t i = 1; i <= text_len; ++i) {
+        for (size_t j = 1; j <= pattern_len; ++j) {
+            if (pattern_lower[j - 1] == L'*') {
+                // * can match empty or any sequence
+                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
+            } else if (pattern_lower[j - 1] == L'?' || pattern_lower[j - 1] == text_lower[i - 1]) {
+                // ? matches any single char, or exact match
+                dp[i][j] = dp[i - 1][j - 1];
+            }
+        }
+    }
+
+    return dp[text_len][pattern_len];
+}
+
+// Parse comma-separated patterns and check if filename matches any
+static bool matches_any_pattern(const std::wstring& filename, const std::wstring& filter_patterns) {
+    if (filter_patterns.empty()) {
+        return true;  // No filter, match all
+    }
+
+    // Split by comma
+    std::vector<std::wstring> patterns;
+    std::wstringstream wss(filter_patterns);
+    std::wstring pattern;
+    while (std::getline(wss, pattern, L',')) {
+        // Trim whitespace
+        size_t start = pattern.find_first_not_of(L" \t");
+        size_t end = pattern.find_last_not_of(L" \t");
+        if (start != std::wstring::npos && end != std::wstring::npos) {
+            patterns.push_back(pattern.substr(start, end - start + 1));
+        }
+    }
+
+    // Check against each pattern
+    for (const auto& p : patterns) {
+        if (wildcard_match(filename, p)) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 static ScanManager g_scan_manager;
 static bool g_interrupted = false;
@@ -172,13 +245,14 @@ int main(int argc, char** argv) {
     });
 
     // recover
-    std::string recover_session, recover_db, recover_output;
+    std::string recover_session, recover_db, recover_output, recover_filter;
     bool auto_switch = true;
 
     auto recover_cmd = app.add_subcommand("recover", "恢复扫描结果中的文件");
     recover_cmd->add_option("session", recover_session, "扫描会话ID")->required();
     recover_cmd->add_option("--db", recover_db, "缓存数据库路径")->default_val("scan_cache.db");
     recover_cmd->add_option("--output,-o", recover_output, "目标输出目录")->required();
+    recover_cmd->add_option("--filter", recover_filter, "文件名过滤模式（支持通配符 * 和 ?，逗号分隔多个）");
     recover_cmd->add_flag("--auto-switch", auto_switch, "空间不足自动切换到下一个目标");
 
     recover_cmd->callback([&]() {
@@ -196,7 +270,13 @@ int main(int argc, char** argv) {
             return;
         }
 
+        // Convert filter pattern to wstring
+        std::wstring filter_patterns = std::wstring(recover_filter.begin(), recover_filter.end());
+
         std::cout << "找到 " << file_count << " 个文件待恢复\n";
+        if (!recover_filter.empty()) {
+            std::cout << "过滤模式: " << recover_filter << "\n";
+        }
         std::cout << "输出目录: " << recover_output << "\n";
 
         // 创建输出目录
@@ -213,17 +293,26 @@ int main(int argc, char** argv) {
 
         uint32_t batch_size = 100;
         uint32_t recovered = 0;
+        uint32_t filtered_count = 0;
 
         for (uint32_t offset = 0; offset < file_count; offset += batch_size) {
             auto files = db.query_files(recover_session, batch_size, offset);
             for (const auto& file : files) {
+                // Apply filter if specified
+                if (!matches_any_pattern(file.file_name, filter_patterns)) {
+                    filtered_count++;
+                    continue;
+                }
                 std::wcout << L"恢复: " << file.file_name << L"\n";
                 recovered++;
             }
-            std::cout << "进度: " << recovered << "/" << file_count << "\n";
+            std::cout << "进度: " << (offset + files.size()) << "/" << file_count << "\n";
         }
 
         std::cout << "\n恢复完成: " << recovered << " 个文件\n";
+        if (filtered_count > 0) {
+            std::cout << "已过滤: " << filtered_count << " 个文件\n";
+        }
         db.close();
     });
 
