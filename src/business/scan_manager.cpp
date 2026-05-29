@@ -43,8 +43,15 @@ ScanProgress ScanManager::progress() const {
 void ScanManager::scan_thread_func(Config config) {
     DiskHandle handle;
     if (!handle.open(config.device_path)) {
+        OutputDebugStringW(L"[ScanManager] Failed to open disk\n");
         scanning_ = false;
         cache_db_.close();
+        // Notify completion even on failure
+        if (on_progress_) {
+            ScanProgress p{};
+            p.is_complete = true;
+            on_progress_(p);
+        }
         return;
     }
 
@@ -92,6 +99,7 @@ void ScanManager::scan_thread_func(Config config) {
         if (on_progress_) on_progress_(progress_);
     };
 
+    OutputDebugStringW(L"[ScanManager] Starting scan...\n");
     scanner.scan(reader, scan_config, on_file, on_scan_progress);
 
     flush_cache(current_session_id_);
@@ -99,6 +107,10 @@ void ScanManager::scan_thread_func(Config config) {
     cache_db_.save_progress(current_session_id_, progress_);
     cache_db_.close();
     scanning_ = false;
+
+    OutputDebugStringW(L"[ScanManager] Scan complete\n");
+    // Final progress update to signal completion
+    if (on_progress_) on_progress_(progress_);
 }
 
 void ScanManager::flush_cache(const std::string& session_id) {

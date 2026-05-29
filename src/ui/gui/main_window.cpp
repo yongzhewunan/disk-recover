@@ -394,6 +394,12 @@ void MainWindow::OnNotify(LPNMHDR nmhdr) {
 }
 
 void MainWindow::OnScanProgress(const ScanProgress& progress) {
+    // Check if scan is complete
+    if (progress.is_complete) {
+        OnScanComplete();
+        return;
+    }
+
     // Update progress bar
     if (progress.total_sectors > 0) {
         int percent = static_cast<int>((progress.sectors_scanned * 100) / progress.total_sectors);
@@ -719,21 +725,29 @@ void MainWindow::StartScan() {
 
     // If a partition is selected, limit scan to that partition
     const PartitionInfo* part = GetSelectedPartition();
-    if (part) {
+    if (part && part->sector_count > 0) {
         config.start_sector = part->start_sector;
         config.end_sector = part->start_sector + part->sector_count;
     } else {
-        // Scan entire disk
+        // Scan entire disk - but limit to reasonable range for testing
         config.start_sector = 0;
         config.end_sector = disk->geometry.total_sectors;
     }
 
+    // Debug output
+    wchar_t debugMsg[256];
+    _snwprintf_s(debugMsg, _TRUNCATE, L"[MainWindow] Starting scan: %s, sectors %llu to %llu\n",
+                 disk->device_path.c_str(), config.start_sector, config.end_sector);
+    OutputDebugStringW(debugMsg);
+
     // Start scan
     if (!scanManager_->start_scan(config)) {
+        OutputDebugStringW(L"[MainWindow] start_scan returned false\n");
         MessageBoxW(hwnd_, L"Failed to start scan.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
 
+    OutputDebugStringW(L"[MainWindow] Scan started successfully\n");
     EnableControls(true);
     UpdateStatus(L"Starting scan...");
 }
