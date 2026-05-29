@@ -9,6 +9,16 @@
 
 namespace disk_recover {
 
+// File system type detection result
+enum class FileSystemType : uint8_t {
+    Unknown = 0,
+    NTFS    = 1,
+    FAT12   = 2,
+    FAT16   = 3,
+    FAT32   = 4,
+    ExFAT   = 5,
+};
+
 class ScanManager {
 public:
     struct Config {

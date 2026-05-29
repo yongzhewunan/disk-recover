@@ -13,6 +13,9 @@ target_include_directories(disk_recover_business PUBLIC
 target_link_libraries(disk_recover_business PUBLIC
     disk_recover_disk_io
     disk_recover_filesystem_raw
+    disk_recover_filesystem_ntfs
+    disk_recover_filesystem_fat
+    disk_recover_filesystem_exfat
     disk_recover_common
     unofficial::sqlite3::sqlite3
     windowscodecs
