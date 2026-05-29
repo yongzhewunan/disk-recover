@@ -69,6 +69,8 @@ private:
     HWND hScanImagesCheck_ = nullptr;       // Checkbox for image filter
     HWND hScanVideosCheck_ = nullptr;       // Checkbox for video filter
     HWND hBadSectorCombo_ = nullptr;        // ComboBox for bad sector policy
+    HWND hBadSectorPanel_ = nullptr;        // Panel for bad sector info
+    HWND hBadSectorCount_ = nullptr;        // Static text for bad sector count
 
     // Business logic managers
     std::unique_ptr<ScanManager> scanManager_;
@@ -78,6 +80,7 @@ private:
     // Disk information cache
     std::vector<DiskInfo> cachedDisks_;
     std::vector<RecoverableFile> foundFiles_;  // Files found during scan
+    uint32_t badSectorsCount_ = 0;  // Bad sectors detected during scan
 
     // Layout constants
     static constexpr int MARGIN = 8;

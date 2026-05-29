@@ -18,6 +18,8 @@
 #define IDC_SCAN_IMAGES     1011    // Checkbox for image file filter
 #define IDC_SCAN_VIDEOS     1012    // Checkbox for video file filter
 #define IDC_BAD_SECTOR_POLICY 1013  // ComboBox for bad sector policy
+#define IDC_BAD_SECTOR_PANEL  1014   // Static panel for bad sector info
+#define IDC_BAD_SECTOR_COUNT  1015   // Static text for bad sector count
 
 // Menu command IDs (2000-2999)
 #define IDM_SCAN            2001

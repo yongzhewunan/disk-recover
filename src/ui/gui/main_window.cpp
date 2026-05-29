@@ -296,6 +296,18 @@ void MainWindow::OnCreate() {
     ComboBox_AddString(hBadSectorCombo_, L"Force");
     ComboBox_SetCurSel(hBadSectorCombo_, 0);  // Default to Skip
 
+    // Create bad sector info panel (static text showing bad sector count)
+    hBadSectorPanel_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"STATIC", L"Bad Sectors: 0",
+        WS_VISIBLE | WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
+        MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN + 80 + MARGIN, configRowY,
+        120, CONTROL_HEIGHT,
+        hwnd_, reinterpret_cast<HMENU>(IDC_BAD_SECTOR_PANEL), hInst_, nullptr);
+    if (!hBadSectorPanel_) {
+        OutputDebugStringW(L"[DiskRecover] Failed to create bad sector panel\n");
+    }
+
     // Create file list ListView
     int fileListY = configRowY + CONTROL_HEIGHT + MARGIN;
     hFileList_ = CreateListView(hwnd_, IDC_FILE_LIST, MARGIN, fileListY, 600, 400);
@@ -447,6 +459,14 @@ void MainWindow::OnScanProgress(const ScanProgress& progress) {
         UpdateProgress(percent);
     }
 
+    // Update bad sector count display
+    badSectorsCount_ = progress.bad_sectors_hit;
+    if (hBadSectorPanel_) {
+        wchar_t badSectorText[64];
+        _snwprintf_s(badSectorText, _TRUNCATE, L"Bad Sectors: %u", progress.bad_sectors_hit);
+        SetWindowTextW(hBadSectorPanel_, badSectorText);
+    }
+
     // Update status text
     wchar_t status[256];
     _snwprintf_s(status, _TRUNCATE, L"Scanning... %llu/%llu sectors, %u files found",
@@ -470,7 +490,12 @@ void MainWindow::OnScanComplete() {
     UpdateProgress(100);
 
     wchar_t status[256];
-    _snwprintf_s(status, _TRUNCATE, L"Scan complete. %zu files found.", foundFiles_.size());
+    if (badSectorsCount_ > 0) {
+        _snwprintf_s(status, _TRUNCATE, L"Scan complete. %zu files found, %u bad sectors detected.",
+                     foundFiles_.size(), badSectorsCount_);
+    } else {
+        _snwprintf_s(status, _TRUNCATE, L"Scan complete. %zu files found.", foundFiles_.size());
+    }
     UpdateStatus(status);
 }
 
@@ -758,6 +783,12 @@ void MainWindow::StartScan() {
     // Clear previous results
     ClearFileList();
     UpdateProgress(0);
+    badSectorsCount_ = 0;
+
+    // Reset bad sector count display
+    if (hBadSectorPanel_) {
+        SetWindowTextW(hBadSectorPanel_, L"Bad Sectors: 0");
+    }
 
     // Configure scan from UI controls
     ScanManager::Config config;
