@@ -13,6 +13,9 @@
 #include "disk-io/aligned_buffer.hpp"
 #include "business/multi_target_writer.hpp"
 
+// For admin check
+#include <sddl.h>
+
 namespace disk_recover::gui {
 
 // Helper: Convert integer to wstring
@@ -610,10 +613,30 @@ void MainWindow::RefreshDiskList() {
     ComboBox_ResetContent(hDiskList_);
 
     if (cachedDisks_.empty()) {
-        ComboBox_AddString(hDiskList_, L"No disks found");
+        ComboBox_AddString(hDiskList_, L"No disks - Run as Admin");
         ComboBox_SetCurSel(hDiskList_, 0);
         EnableWindow(hScanBtn_, FALSE);
-        UpdateStatus(L"No physical disks found. Run as Administrator.");
+
+        // Check if running as administrator
+        BOOL isAdmin = FALSE;
+        PSID adminGroup = nullptr;
+        SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+        if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                      DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+            CheckTokenMembership(nullptr, adminGroup, &isAdmin);
+            FreeSid(adminGroup);
+        }
+
+        if (!isAdmin) {
+            UpdateStatus(L"ERROR: Run as Administrator to access physical disks.");
+            MessageBoxW(hwnd_,
+                L"This application requires Administrator privileges to access physical disks.\n\n"
+                L"Please right-click disk-recover.exe and select \"Run as administrator\".",
+                L"Administrator Required",
+                MB_OK | MB_ICONWARNING);
+        } else {
+            UpdateStatus(L"No physical disks found on this system.");
+        }
         return;
     }
 

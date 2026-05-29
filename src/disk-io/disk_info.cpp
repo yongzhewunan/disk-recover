@@ -7,10 +7,27 @@ namespace disk_recover {
 
 std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
     std::vector<DiskInfo> disks;
+
+    // Try to enumerate up to 32 physical drives
+    // Note: Requires Administrator privileges to access physical disks
     for (uint32_t i = 0; i < 32; ++i) {
         std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(i);
         DiskHandle handle;
-        if (!handle.open(path)) break;
+
+        // Try to open this disk - if fails, continue to next (disk might not exist)
+        if (!handle.open(path)) {
+            // Only stop if we've found at least one disk and this one doesn't exist
+            // Otherwise continue trying (might be permission issue on first disk)
+            if (disks.empty() && i == 0) {
+                // First disk failed - likely permission issue or no disks
+                continue;
+            }
+            // If we found disks before, stop when we can't open more
+            if (!disks.empty()) {
+                break;
+            }
+            continue;
+        }
 
         DiskInfo info{};
         info.physical_drive_number = i;
@@ -23,6 +40,17 @@ std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
 
         disks.push_back(std::move(info));
     }
+
+    // If no disks found, try again with a warning about permissions
+    if (disks.empty()) {
+        // Try PhysicalDrive0 explicitly to detect permission issue
+        DiskHandle handle;
+        if (!handle.open(L"\\\\.\\PhysicalDrive0")) {
+            // Log: likely need admin privileges
+            OutputDebugStringW(L"[DiskInfo] Cannot open PhysicalDrive0 - may need Administrator privileges\n");
+        }
+    }
+
     return disks;
 }
 
