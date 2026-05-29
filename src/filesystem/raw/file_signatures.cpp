@@ -9,14 +9,15 @@ static const uint8_t BMP_PAT[]  = {0x42, 0x4D};
 static const uint8_t GIF_PAT[]  = {0x47, 0x49, 0x46, 0x38};
 static const uint8_t TIFF_LE_PAT[] = {0x49, 0x49, 0x2A, 0x00};
 static const uint8_t TIFF_BE_PAT[] = {0x4D, 0x4D, 0x00, 0x2A};
-static const uint8_t WEBP_PAT[] = {0x52, 0x49, 0x46, 0x46};
-static const uint8_t MP4_PAT[]  = {0x66, 0x74, 0x79, 0x70};  // at offset 4
-static const uint8_t AVI_PAT[]  = {0x52, 0x49, 0x46, 0x46};  // + AVI at offset 8
-static const uint8_t MKV_PAT[]  = {0x1A, 0x45, 0xDF, 0xA3};
+static const uint8_t WEBP_PAT[] = {0x52, 0x49, 0x46, 0x46};  // RIFF, check 'WEBP' at offset 8
+static const uint8_t MP4_PAT[]  = {0x66, 0x74, 0x79, 0x70};  // 'ftyp' at offset 4
+static const uint8_t AVI_PAT[]  = {0x52, 0x49, 0x46, 0x46};  // RIFF, check 'AVI ' at offset 8
+static const uint8_t MKV_PAT[]  = {0x1A, 0x45, 0xDF, 0xA3};  // EBML header (MKV/WebM)
 static const uint8_t WMV_PAT[]  = {0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11};
 static const uint8_t FLV_PAT[]  = {0x46, 0x4C, 0x56};
-static const uint8_t MOV_PAT[]  = {0x6D, 0x6F, 0x6F, 0x76};  // at offset 4
+static const uint8_t MOV_PAT[]  = {0x6D, 0x6F, 0x6F, 0x76};  // 'moov' at offset 4
 static const uint8_t HEIC_PAT[] = {0x66, 0x74, 0x79, 0x70};  // 'ftyp' at offset 4
+static const uint8_t MTS_PAT[]  = {0x47};  // MPEG-2 TS sync byte
 
 // RAW camera format signatures
 // Most RAW formats are TIFF-based (II* header = 0x49 0x49 0x2A 0x00)
@@ -46,16 +47,33 @@ const std::vector<FileSignatures::SignatureEntry>& FileSignatures::entries() {
         {FileType::Image, L"heic", L"HEIC (Apple HEIF)", HEIC_PAT, 4, 4},
         // Video formats
         {FileType::Video, L"mp4",  L"MP4",      MP4_PAT,  4, 4},
+        {FileType::Video, L"webm", L"WebM",     MKV_PAT,  4, 0},  // EBML header, same as MKV
         {FileType::Video, L"avi",  L"AVI",      AVI_PAT,  4, 0},
-        {FileType::Video, L"mkv",  L"MKV/WebM", MKV_PAT, 4, 0},
+        {FileType::Video, L"mkv",  L"MKV",      MKV_PAT,  4, 0},
         {FileType::Video, L"wmv",  L"WMV/ASF",  WMV_PAT, 8, 0},
         {FileType::Video, L"flv",  L"FLV",      FLV_PAT,  3, 0},
         {FileType::Video, L"mov",  L"MOV",      MOV_PAT,  4, 4},
+        // MPEG-2 Transport Stream (AVCHD video)
+        {FileType::Video, L"mts",  L"MTS (AVCHD)",  MTS_PAT, 1, 0},
+        {FileType::Video, L"m2ts", L"M2TS (AVCHD)", MTS_PAT, 1, 0},
     };
     return sigs;
 }
 
 std::optional<FileSignature> FileSignatures::match(const uint8_t* data, size_t length) {
+    // Special handling for RIFF-based formats (WEBP vs AVI)
+    // Both start with 'RIFF' but have different identifiers at offset 8
+    if (length >= 12) {
+        if (data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46) {
+            // Check the 4-byte identifier at offset 8
+            if (data[8] == 0x57 && data[9] == 0x45 && data[10] == 0x42 && data[11] == 0x50) {
+                // 'WEBP' found
+                return FileSignature{FileType::Image, L"webp", L"WebP"};
+            }
+            // Note: AVI will be handled by the general loop below
+        }
+    }
+
     for (const auto& entry : entries()) {
         if (length < entry.offset + entry.pattern_len) continue;
         bool matched = true;
