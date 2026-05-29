@@ -257,6 +257,61 @@ int main(int argc, char** argv) {
         db.close();
     });
 
+    // bad-sectors
+    std::string bad_sectors_session, bad_sectors_db;
+    auto bad_sectors_cmd = app.add_subcommand("bad-sectors", "显示扫描会话的坏道信息");
+    bad_sectors_cmd->add_option("session", bad_sectors_session, "扫描会话ID")->required();
+    bad_sectors_cmd->add_option("--db", bad_sectors_db, "缓存数据库路径")->default_val("scan_cache.db");
+
+    bad_sectors_cmd->callback([&]() {
+        ScanCacheDB db;
+        std::wstring db_path = std::wstring(bad_sectors_db.begin(), bad_sectors_db.end());
+        if (!db.open(db_path)) {
+            std::cerr << "无法打开数据库: " << bad_sectors_db << "\n";
+            return;
+        }
+
+        // Load bad sectors
+        auto bad_sectors = db.load_bad_sectors(bad_sectors_session);
+
+        std::cout << "会话: " << bad_sectors_session << "\n";
+        std::cout << "坏道数量: " << bad_sectors.size() << "\n";
+
+        if (bad_sectors.empty()) {
+            std::cout << "未发现坏道\n";
+        } else {
+            std::cout << "\n坏道列表:\n";
+            std::cout << "序号\t扇区号 (LBA)\n";
+            std::cout << "----\t-------------\n";
+
+            // Display up to 100 sectors
+            size_t display_count = std::min(bad_sectors.size(), static_cast<size_t>(100));
+            for (size_t i = 0; i < display_count; ++i) {
+                std::cout << (i + 1) << "\t" << bad_sectors[i] << "\n";
+            }
+
+            if (bad_sectors.size() > 100) {
+                std::cout << "... 还有 " << (bad_sectors.size() - 100) << " 个坏道\n";
+            }
+
+            // Calculate affected range
+            uint64_t min_sector = bad_sectors[0];
+            uint64_t max_sector = bad_sectors[0];
+            for (uint64_t sector : bad_sectors) {
+                min_sector = std::min(min_sector, sector);
+                max_sector = std::max(max_sector, sector);
+            }
+
+            std::cout << "\n影响范围:\n";
+            std::cout << "  起始扇区: " << min_sector << "\n";
+            std::cout << "  结束扇区: " << max_sector << "\n";
+            std::cout << "  扇区跨度: " << (max_sector - min_sector + 1) << "\n";
+            std::wcout << L"  数据大小: " << utils::FormatFileSize((max_sector - min_sector + 1) * 512) << L"\n";
+        }
+
+        db.close();
+    });
+
     // preview
     std::string preview_session, preview_db, preview_file_ref, preview_output;
     std::string preview_device;
