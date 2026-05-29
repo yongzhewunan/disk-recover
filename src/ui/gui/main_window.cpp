@@ -154,6 +154,9 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         auto* cs = reinterpret_cast<CREATESTRUCT*>(lParam);
         self = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, 0, reinterpret_cast<LONG_PTR>(self));
+
+        // IMPORTANT: Set hwnd_ BEFORE OnCreate, because child controls need it
+        self->hwnd_ = hwnd;
     } else {
         self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, 0));
     }
@@ -239,6 +242,7 @@ void MainWindow::OnCreate() {
 
     // Create disk selection ComboBox
     hDiskList_ = CreateComboBox(hwnd_, IDC_DISK_LIST, MARGIN + 85, MARGIN, COMBO_WIDTH, CONTROL_HEIGHT + 200);
+    LOG_FMT(L"[MainWindow] Created disk list ComboBox: hwnd=%p", hDiskList_);
 
     // Create partition label
     hPartitionLabel_ = CreateLabel(hwnd_, L"Partition:", MARGIN + 85 + COMBO_WIDTH + MARGIN, MARGIN, 60, CONTROL_HEIGHT);
@@ -247,6 +251,7 @@ void MainWindow::OnCreate() {
     hPartitionList_ = CreateComboBox(hwnd_, IDC_PARTITION_LIST,
                                      MARGIN + 85 + COMBO_WIDTH + MARGIN + 65, MARGIN,
                                      COMBO_WIDTH, CONTROL_HEIGHT + 200);
+    LOG_FMT(L"[MainWindow] Created partition list ComboBox: hwnd=%p", hPartitionList_);
 
     // Create Scan button
     hScanBtn_ = CreateButton(hwnd_, L"Scan", IDC_SCAN_BTN,
@@ -531,14 +536,19 @@ HWND MainWindow::CreateLabel(HWND parent, const wchar_t* text, int x, int y, int
 }
 
 HWND MainWindow::CreateComboBox(HWND parent, int id, int x, int y, int w, int h) {
+    // ComboBox is a standard Windows control, uses "COMBOBOX" class name
     HWND hwnd = CreateWindowExW(
-        0, WC_COMBOBOX, L"",
-        WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        WS_EX_CLIENTEDGE,  // Add border for visibility
+        WC_COMBOBOX, L"",
+        WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
         x, y, w, h,
         parent, reinterpret_cast<HMENU>(id), hInst_, nullptr
     );
     if (!hwnd) {
-        OutputDebugStringW(L"[DiskRecover] Failed to create combo box control\n");
+        DWORD err = GetLastError();
+        LOG_FMT(L"[MainWindow] CreateComboBox FAILED for id=%d, error=%d", id, err);
+    } else {
+        LOG_FMT(L"[MainWindow] CreateComboBox SUCCESS for id=%d, hwnd=%p", id, hwnd);
     }
     return hwnd;
 }
@@ -757,26 +767,54 @@ void MainWindow::RefreshDiskList() {
         return;
     }
 
+    LOG_MSG(L"[MainWindow] Populating disk ComboBox...");
+
     for (const auto& disk : cachedDisks_) {
         // Format: "PhysicalDrive0 - 256 GB (Samsung SSD 860)"
         std::wstring text = disk.device_path + L" - " + FormatSize(disk.disk_size_bytes);
         if (!disk.model_name.empty()) {
             text += L" (" + disk.model_name + L")";
         }
+        LOG_FMT(L"[MainWindow] Adding disk: %s", text.c_str());
         int idx = ComboBox_AddString(hDiskList_, text.c_str());
+        LOG_FMT(L"[MainWindow] ComboBox_AddString returned %d", idx);
         ComboBox_SetItemData(hDiskList_, idx, disk.physical_drive_number);
     }
 
     // Select first disk and update partition list
-    ComboBox_SetCurSel(hDiskList_, 0);
+    LOG_MSG(L"[MainWindow] Setting first disk selection");
+    int selResult = ComboBox_SetCurSel(hDiskList_, 0);
+    LOG_FMT(L"[MainWindow] ComboBox_SetCurSel returned %d", selResult);
+
+    // Verify the selection
+    int verifySel = ComboBox_GetCurSel(hDiskList_);
+    LOG_FMT(L"[MainWindow] Verify selection: %d", verifySel);
+
+    // Get the text of the selected item
+    wchar_t verifyText[256] = {};
+    ComboBox_GetLBText(hDiskList_, 0, verifyText);
+    LOG_FMT(L"[MainWindow] First item text: %s", verifyText);
+
+    // Force the ComboBox to show its content
+    SetWindowTextW(hDiskList_, verifyText);
+
+    LOG_MSG(L"[MainWindow] Calling RefreshPartitionList");
     RefreshPartitionList(cachedDisks_[0]);
+
+    LOG_MSG(L"[MainWindow] Enabling Scan button");
     EnableWindow(hScanBtn_, TRUE);
+
+    LOG_MSG(L"[MainWindow] RefreshDiskList completed successfully");
 }
 
 void MainWindow::RefreshPartitionList(const DiskInfo& disk) {
+    LOG_MSG(L"[MainWindow] RefreshPartitionList called");
     ComboBox_ResetContent(hPartitionList_);
 
+    LOG_FMT(L"[MainWindow] Disk has %zu partitions", disk.partitions.size());
+
     if (disk.partitions.empty()) {
+        LOG_MSG(L"[MainWindow] No partitions, adding placeholder");
         ComboBox_AddString(hPartitionList_, L"No partitions");
         ComboBox_SetCurSel(hPartitionList_, 0);
         return;
@@ -788,10 +826,12 @@ void MainWindow::RefreshPartitionList(const DiskInfo& disk) {
         if (!part.volume_label.empty()) {
             text += L" (" + part.volume_label + L")";
         }
+        LOG_FMT(L"[MainWindow] Adding partition: %s", text.c_str());
         ComboBox_AddString(hPartitionList_, text.c_str());
     }
 
     ComboBox_SetCurSel(hPartitionList_, 0);
+    LOG_MSG(L"[MainWindow] RefreshPartitionList completed");
 }
 
 const DiskInfo* MainWindow::GetSelectedDisk() const {
