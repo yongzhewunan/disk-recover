@@ -578,7 +578,8 @@ HBITMAP PreviewManager::CreateVideoThumbnailFromData(
 
     // Set error resilience flags for corrupted video
     codecCtx->err_recognition = AV_EF_EXPLODE;
-    codecCtx->flags |= AV_CODEC_FLAG_TRUNCATED;  // Handle truncated frames
+    // Note: AV_CODEC_FLAG_TRUNCATED was deprecated in FFmpeg 5.0+
+    // Use AV_CODEC_CAP_TRUNCATED check on codec capabilities instead
 
     // Open codec
     ret = avcodec_open2(codecCtx.get(), codec, nullptr);
