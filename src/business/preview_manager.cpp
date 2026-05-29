@@ -282,6 +282,13 @@ bool PreviewManager::IsImageFile(const std::wstring& extension) noexcept {
         L".ico",                                 // ICO
         L".wdp", L".hdp",                        // HD Photo
         L".dds",                                 // DDS
+        // RAW camera formats
+        L".cr2",                                 // Canon RAW
+        L".nef",                                 // Nikon RAW
+        L".arw",                                 // Sony RAW
+        L".dng",                                 // Adobe DNG
+        L".rw2",                                 // Panasonic RAW
+        L".orf",                                 // Olympus RAW
     };
 
     for (const auto& supported : imageExtensions) {

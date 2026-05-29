@@ -17,6 +17,15 @@ static const uint8_t WMV_PAT[]  = {0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x1
 static const uint8_t FLV_PAT[]  = {0x46, 0x4C, 0x56};
 static const uint8_t MOV_PAT[]  = {0x6D, 0x6F, 0x6F, 0x76};  // at offset 4
 
+// RAW camera format signatures
+// Most RAW formats are TIFF-based (II* header = 0x49 0x49 0x2A 0x00)
+static const uint8_t CR2_PAT[]  = {0x49, 0x49, 0x2A, 0x00};  // Canon RAW - TIFF header, check bytes 8-10 for "CR"
+static const uint8_t NEF_PAT[]  = {0x49, 0x49, 0x2A, 0x00};  // Nikon RAW - TIFF header
+static const uint8_t ARW_PAT[]  = {0x49, 0x49, 0x2A, 0x00};  // Sony RAW - TIFF header
+static const uint8_t DNG_PAT[]  = {0x49, 0x49, 0x2A, 0x00};  // Adobe DNG - TIFF header
+static const uint8_t RW2_PAT[]  = {0x49, 0x49, 0x2A, 0x00};  // Panasonic RAW - TIFF header
+static const uint8_t ORF_PAT[]  = {0x49, 0x49, 0x52, 0x4F};  // Olympus RAW - "IIRO" header (first 4 bytes of "IIROLYPUS")
+
 const std::vector<FileSignatures::SignatureEntry>& FileSignatures::entries() {
     static const std::vector<SignatureEntry> sigs = {
         {FileType::Image, L"jpg",  L"JPEG",     JPEG_PAT, 3, 0},
@@ -25,6 +34,14 @@ const std::vector<FileSignatures::SignatureEntry>& FileSignatures::entries() {
         {FileType::Image, L"gif",  L"GIF",      GIF_PAT,  4, 0},
         {FileType::Image, L"tiff", L"TIFF-LE",  TIFF_LE_PAT, 4, 0},
         {FileType::Image, L"tiff", L"TIFF-BE",  TIFF_BE_PAT, 4, 0},
+        // RAW camera formats
+        {FileType::Image, L"cr2",  L"CR2 (Canon RAW)",   CR2_PAT,  4, 0},
+        {FileType::Image, L"nef",  L"NEF (Nikon RAW)",   NEF_PAT,  4, 0},
+        {FileType::Image, L"arw",  L"ARW (Sony RAW)",    ARW_PAT,  4, 0},
+        {FileType::Image, L"dng",  L"DNG (Adobe DNG)",   DNG_PAT,  4, 0},
+        {FileType::Image, L"rw2",  L"RW2 (Panasonic)",   RW2_PAT,  4, 0},
+        {FileType::Image, L"orf",  L"ORF (Olympus RAW)", ORF_PAT,  4, 0},
+        // Video formats
         {FileType::Video, L"mp4",  L"MP4",      MP4_PAT,  4, 4},
         {FileType::Video, L"avi",  L"AVI",      AVI_PAT,  4, 0},
         {FileType::Video, L"mkv",  L"MKV/WebM", MKV_PAT, 4, 0},
