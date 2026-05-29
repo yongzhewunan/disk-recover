@@ -74,6 +74,27 @@ std::optional<FileSignature> FileSignatures::match(const uint8_t* data, size_t l
         }
     }
 
+    // Special handling for 'ftyp'-based formats (MP4, MOV, HEIC, etc.)
+    // All have 'ftyp' at offset 4, but different brands at offset 8
+    if (length >= 12) {
+        // Check for 'ftyp' at offset 4
+        if (data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70) {
+            // Check brand at offset 8
+            // HEIC brands: heic, heix, mif1, msf1
+            if ((data[8] == 0x68 && data[9] == 0x65 && data[10] == 0x69 && data[11] == 0x63) ||  // heic
+                (data[8] == 0x68 && data[9] == 0x65 && data[10] == 0x69 && data[11] == 0x78) ||  // heix
+                (data[8] == 0x6D && data[9] == 0x69 && data[10] == 0x66 && data[11] == 0x31)) {  // mif1
+                return FileSignature{FileType::Image, L"heic", L"HEIC (Apple HEIF)"};
+            }
+            // MOV brands: qt
+            if (data[8] == 0x71 && data[9] == 0x74 && data[10] == 0x20 && data[11] == 0x20) {  // qt  (with spaces)
+                return FileSignature{FileType::Video, L"mov", L"MOV"};
+            }
+            // MP4 brands: isom, mp41, mp42, M4V, etc. - default to MP4 for other ftyp
+            return FileSignature{FileType::Video, L"mp4", L"MP4"};
+        }
+    }
+
     for (const auto& entry : entries()) {
         if (length < entry.offset + entry.pattern_len) continue;
         bool matched = true;

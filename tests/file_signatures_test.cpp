@@ -20,7 +20,9 @@ TEST(FileSignaturesTest, MatchPngHeader) {
 }
 
 TEST(FileSignaturesTest, MatchMp4Header) {
-    uint8_t data[] = {0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70};
+    // Real MP4 has 'ftyp' at offset 4, followed by brand at offset 8
+    // Example: size (4 bytes), 'ftyp' (4 bytes), brand 'isom' (4 bytes)
+    uint8_t data[] = {0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6F, 0x6D};  // ftyp + isom
     auto sig = FileSignatures::match(data, sizeof(data));
     ASSERT_TRUE(sig.has_value());
     EXPECT_EQ(sig->file_type, FileType::Video);
