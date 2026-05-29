@@ -27,6 +27,7 @@
 #define IDM_EXIT            2003
 #define IDM_ABOUT           2004
 #define IDM_STOP            2005
+#define IDM_DEMO_DATA       2006    // Load demo data for testing
 
 // ListView column indices
 #define COL_NAME            0

@@ -134,6 +134,7 @@ private:
     void StopScan();
     void StartRecovery();
     void UpdatePreview(int selectedIndex);
+    void LoadDemoData();  // Load demo data for testing without real disk
 
     // Window class name
     static constexpr const wchar_t* CLASS_NAME = L"DiskRecoverMainWindow";

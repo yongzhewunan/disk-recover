@@ -408,6 +408,10 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
                 MB_OK | MB_ICONINFORMATION);
             break;
 
+        case IDM_DEMO_DATA:
+            LoadDemoData();
+            break;
+
         // ComboBox notifications
         case IDC_DISK_LIST:
             if (notifyCode == CBN_SELCHANGE) {
@@ -684,7 +688,12 @@ void MainWindow::UpdateProgress(int percent) {
 
 void MainWindow::RefreshDiskList() {
     // Enumerate physical disks
+    OutputDebugStringW(L"[MainWindow] RefreshDiskList: enumerating physical disks...\n");
     cachedDisks_ = DiskInfoQuery::EnumeratePhysicalDisks();
+
+    wchar_t debugMsg[128];
+    _snwprintf_s(debugMsg, _TRUNCATE, L"[MainWindow] Found %zu disks\n", cachedDisks_.size());
+    OutputDebugStringW(debugMsg);
 
     // Clear and populate disk ComboBox
     ComboBox_ResetContent(hDiskList_);
@@ -713,6 +722,14 @@ void MainWindow::RefreshDiskList() {
                 MB_OK | MB_ICONWARNING);
         } else {
             UpdateStatus(L"No physical disks found on this system.");
+            MessageBoxW(hwnd_,
+                L"No physical disks were found on this system.\n\n"
+                L"This could happen if:\n"
+                L"- No disks are connected\n"
+                L"- All disks are in use by other applications\n"
+                L"- Disk drivers are not properly installed",
+                L"No Disks Found",
+                MB_OK | MB_ICONINFORMATION);
         }
         return;
     }
@@ -1057,6 +1074,113 @@ void MainWindow::UpdatePreview(int selectedIndex) {
 
     // Note: HBITMAP ownership transfers to the static control
     // It will be deleted when the control is destroyed or a new image is set
+}
+
+void MainWindow::LoadDemoData() {
+    // Clear existing data
+    ClearFileList();
+    cachedDisks_.clear();
+    ComboBox_ResetContent(hDiskList_);
+    ComboBox_ResetContent(hPartitionList_);
+
+    // Add demo disk
+    DiskInfo demoDisk;
+    demoDisk.physical_drive_number = 0;
+    demoDisk.device_path = L"\\\\.\\PhysicalDrive0";
+    demoDisk.disk_size_bytes = 256ULL * 1024 * 1024 * 1024;  // 256 GB
+    demoDisk.model_name = L"Demo SSD";
+    demoDisk.geometry.total_sectors = demoDisk.disk_size_bytes / 512;
+    demoDisk.geometry.sector_size = 512;
+
+    // Add demo partitions
+    PartitionInfo part1;
+    part1.index = 0;
+    part1.start_sector = 2048;
+    part1.sector_count = 1000000000;
+    part1.filesystem_type = L"NTFS";
+    part1.volume_label = L"System";
+    demoDisk.partitions.push_back(part1);
+
+    PartitionInfo part2;
+    part2.index = 1;
+    part2.start_sector = 1000002048;
+    part2.sector_count = 400000000;
+    part2.filesystem_type = L"NTFS";
+    part2.volume_label = L"Data";
+    demoDisk.partitions.push_back(part2);
+
+    cachedDisks_.push_back(demoDisk);
+
+    // Populate disk ComboBox
+    std::wstring diskText = L"PhysicalDrive0 - 256 GB (Demo SSD)";
+    ComboBox_AddString(hDiskList_, diskText.c_str());
+    ComboBox_SetCurSel(hDiskList_, 0);
+
+    // Populate partition ComboBox
+    ComboBox_AddString(hPartitionList_, L"Partition 0 - NTFS (System)");
+    ComboBox_AddString(hPartitionList_, L"Partition 1 - NTFS (Data)");
+    ComboBox_SetCurSel(hPartitionList_, 0);
+
+    EnableWindow(hScanBtn_, TRUE);
+
+    // Add demo files
+    RecoverableFile file1;
+    file1.file_name = L"photo_001.jpg";
+    file1.file_size = 2500000;
+    file1.file_type = FileType::Image;
+    file1.is_corrupted = false;
+    file1.fragments.push_back({1000, 5000});
+    foundFiles_.push_back(file1);
+    AddListViewItem(file1);
+
+    RecoverableFile file2;
+    file2.file_name = L"video_001.mp4";
+    file2.file_size = 150000000;
+    file2.file_type = FileType::Video;
+    file2.is_corrupted = false;
+    file2.fragments.push_back({5000, 300000});
+    foundFiles_.push_back(file2);
+    AddListViewItem(file2);
+
+    RecoverableFile file3;
+    file3.file_name = L"photo_002.png";
+    file3.file_size = 1200000;
+    file3.file_type = FileType::Image;
+    file3.is_corrupted = true;
+    file3.fragments.push_back({10000, 2400});
+    foundFiles_.push_back(file3);
+    AddListViewItem(file3);
+
+    RecoverableFile file4;
+    file4.file_name = L"IMG_2023.cr2";
+    file4.file_size = 25000000;
+    file4.file_type = FileType::Image;
+    file4.is_corrupted = false;
+    file4.fragments.push_back({15000, 50000});
+    foundFiles_.push_back(file4);
+    AddListViewItem(file4);
+
+    RecoverableFile file5;
+    file5.file_name = L"birthday.mov";
+    file5.file_size = 80000000;
+    file5.file_type = FileType::Video;
+    file5.is_corrupted = false;
+    file5.fragments.push_back({20000, 160000});
+    foundFiles_.push_back(file5);
+    AddListViewItem(file5);
+
+    EnableWindow(hRecoverBtn_, TRUE);
+    UpdateStatus(L"Demo data loaded. Click Scan to simulate scanning, or select files and Recover.");
+    UpdateProgress(0);
+
+    MessageBoxW(hwnd_,
+        L"Demo data has been loaded for testing purposes.\n\n"
+        L"- Demo disk: PhysicalDrive0 (256 GB Demo SSD)\n"
+        L"- 5 demo files added to the list\n\n"
+        L"Note: This is simulated data for UI testing.\n"
+        L"Actual disk scanning requires Administrator privileges.",
+        L"Demo Data Loaded",
+        MB_OK | MB_ICONINFORMATION);
 }
 
 } // namespace disk_recover::gui

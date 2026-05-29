@@ -42,6 +42,8 @@ BEGIN
         MENUITEM "&Scan Disk",                IDM_SCAN
         MENUITEM "&Recover Files",            IDM_RECOVER
         MENUITEM SEPARATOR
+        MENUITEM "Load &Demo Data",           IDM_DEMO_DATA
+        MENUITEM SEPARATOR
         MENUITEM "E&xit",                     IDM_EXIT
     END
     POPUP "&Help"
