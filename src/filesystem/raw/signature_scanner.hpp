@@ -24,6 +24,9 @@ public:
 private:
     bool try_recover_file(SectorReader& reader, uint64_t start_sector,
                           const FileSignature& sig, RecoverableFile& file);
+
+    static std::vector<RecoverableFile> merge_video_fragments(
+        std::vector<RecoverableFile>& files, uint32_t sector_size);
 };
 
 } // namespace disk_recover

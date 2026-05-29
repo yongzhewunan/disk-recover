@@ -6,6 +6,111 @@
 
 namespace disk_recover {
 
+// Walk the top-level MP4/MOV atom tree to calculate total file size.
+// MP4/MOV files are structured as a sequence of "atoms" (boxes):
+// Each atom: [4-byte big-endian size][4-byte type][payload]
+// If size==1: next 8 bytes are 64-bit extended size
+// If size==0: atom extends to end of file (can't determine total size)
+// Returns 0 if parsing fails (caller falls back to probe-based approach).
+static uint64_t determine_mp4_size(SectorReader& reader, uint64_t start_sector, uint32_t sector_size) {
+    const uint32_t READ_SECTORS = 4;  // Read 4 sectors at a time (sliding window)
+    const uint64_t MAX_HEADER_SCAN = 4ULL * 1024 * 1024;  // Scan up to 4MB of atom headers
+    const uint64_t ATOM_SANITY_LIMIT = 100ULL * 1024 * 1024 * 1024;  // 100GB sanity cap per atom
+
+    AlignedBuffer buf(READ_SECTORS * sector_size, sector_size);
+
+    uint64_t total_size = 0;       // Accumulated total file size from atoms
+    uint64_t file_offset = 0;      // Current byte offset within the file (from start)
+    uint64_t buf_start = 0;        // File offset of the first byte in buf
+    uint64_t buf_end = 0;          // File offset one past the last byte in buf
+    bool buf_valid = false;
+
+    while (file_offset < MAX_HEADER_SCAN) {
+        // Ensure the buffer covers the atom header at file_offset.
+        // We need at least 8 bytes for a standard atom header.
+        if (!buf_valid || file_offset + 8 > buf_end) {
+            uint64_t read_offset = file_offset;
+            // Align to sector boundary for reading
+            uint64_t sector_num = start_sector + read_offset / sector_size;
+            if (!reader.read_sectors_checked(sector_num, READ_SECTORS, buf)) {
+                return 0;  // Read failure - can't determine size
+            }
+            buf_start = (sector_num - start_sector) * sector_size;
+            buf_end = buf_start + READ_SECTORS * sector_size;
+            buf_valid = true;
+
+            // If after reading, the atom header still isn't covered, bail out
+            if (file_offset + 8 > buf_end) {
+                return 0;
+            }
+        }
+
+        // Parse atom header at file_offset
+        size_t buf_pos = static_cast<size_t>(file_offset - buf_start);
+        const uint8_t* hdr = buf.data() + buf_pos;
+
+        uint32_t atom_size32 = (static_cast<uint32_t>(hdr[0]) << 24) |
+                                (static_cast<uint32_t>(hdr[1]) << 16) |
+                                (static_cast<uint32_t>(hdr[2]) << 8) |
+                                static_cast<uint32_t>(hdr[3]);
+
+        uint64_t atom_size = atom_size32;
+
+        if (atom_size32 == 1) {
+            // 64-bit extended size: need 16 bytes total for the header
+            if (file_offset + 16 > buf_end) {
+                // Re-read to cover the extended header
+                uint64_t sector_num = start_sector + file_offset / sector_size;
+                if (!reader.read_sectors_checked(sector_num, READ_SECTORS, buf)) {
+                    return 0;
+                }
+                buf_start = (sector_num - start_sector) * sector_size;
+                buf_end = buf_start + READ_SECTORS * sector_size;
+                buf_valid = true;
+
+                if (file_offset + 16 > buf_end) {
+                    return 0;  // Can't read extended size
+                }
+                hdr = buf.data() + static_cast<size_t>(file_offset - buf_start);
+            }
+            atom_size = (static_cast<uint64_t>(hdr[8]) << 56) |
+                        (static_cast<uint64_t>(hdr[9]) << 48) |
+                        (static_cast<uint64_t>(hdr[10]) << 40) |
+                        (static_cast<uint64_t>(hdr[11]) << 32) |
+                        (static_cast<uint64_t>(hdr[12]) << 24) |
+                        (static_cast<uint64_t>(hdr[13]) << 16) |
+                        (static_cast<uint64_t>(hdr[14]) << 8) |
+                        static_cast<uint64_t>(hdr[15]);
+        } else if (atom_size32 == 0) {
+            // Atom extends to end of file - we can't determine total size
+            return 0;
+        }
+
+        // Sanity check: individual atom shouldn't exceed 100GB
+        if (atom_size > ATOM_SANITY_LIMIT) {
+            return 0;
+        }
+
+        // Minimum atom size is 8 bytes (header only), or 16 for extended size
+        uint64_t min_size = (atom_size32 == 1) ? 16 : 8;
+        if (atom_size < min_size) {
+            return 0;  // Invalid atom
+        }
+
+        total_size += atom_size;
+        file_offset += atom_size;
+
+        // If atom_size is so large that file_offset exceeds our scan limit, stop
+        if (file_offset > MAX_HEADER_SCAN) {
+            // We've parsed enough atoms to know the file is large.
+            // Return what we have so far as a lower bound.
+            break;
+        }
+    }
+
+    return total_size;
+}
+
 // Parse actual file size from file header bytes
 static uint64_t parse_file_size(FileType file_type, const uint8_t* data, size_t data_len) {
     if (data_len < 16) return 0;
@@ -93,17 +198,17 @@ static uint64_t parse_file_size(FileType file_type, const uint8_t* data, size_t 
         if (data_len >= 8 && data[4] == 'f' && data[5] == 't' && data[6] == 'y' && data[7] == 'p') {
             uint32_t ftyp_sz = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
             if (ftyp_sz >= 8 && ftyp_sz <= 1024) {
-                // Valid ftyp, but total file size unknown from header
-                return 100 * 1024 * 1024;  // 100MB estimate
+                // Valid ftyp but total file size requires atom tree walking
+                return 0;
             }
         }
         // MKV/WebM: EBML header
         if (data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3) {
-            return 100 * 1024 * 1024;  // 100MB estimate
+            return 0;  // Size requires full container parsing
         }
         // FLV
         if (data[0] == 'F' && data[1] == 'L' && data[2] == 'V') {
-            return 50 * 1024 * 1024;  // 50MB estimate
+            return 0;  // Size requires full container parsing
         }
         break;
 
@@ -111,6 +216,73 @@ static uint64_t parse_file_size(FileType file_type, const uint8_t* data, size_t 
         break;
     }
     return 0;
+}
+
+std::vector<RecoverableFile> SignatureScanner::merge_video_fragments(
+    std::vector<RecoverableFile>& files, uint32_t sector_size) {
+
+    if (files.size() <= 1) return std::move(files);
+
+    // Sort by start sector (first fragment's start_sector)
+    std::sort(files.begin(), files.end(),
+        [](const RecoverableFile& a, const RecoverableFile& b) {
+            if (a.fragments.empty() || b.fragments.empty()) return false;
+            return a.fragments[0].start_sector < b.fragments[0].start_sector;
+        });
+
+    // Maximum gap between fragments to consider merging (1MB / sector_size)
+    const uint64_t MAX_GAP_SECTORS = (1024ULL * 1024) / sector_size;
+
+    // Helper to extract file extension (part after last '.')
+    auto get_extension = [](const std::wstring& name) -> std::wstring {
+        auto pos = name.rfind(L'.');
+        if (pos == std::wstring::npos) return L"";
+        return name.substr(pos);
+    };
+
+    std::vector<RecoverableFile> result;
+    result.push_back(std::move(files[0]));
+
+    for (size_t i = 1; i < files.size(); ++i) {
+        RecoverableFile& last = result.back();
+        RecoverableFile& current = files[i];
+
+        // Check if same file type and same extension
+        if (last.file_type == current.file_type &&
+            get_extension(last.file_name) == get_extension(current.file_name)) {
+
+            // Get end sector of last file
+            uint64_t last_end = 0;
+            for (const auto& frag : last.fragments) {
+                last_end = std::max(last_end, frag.start_sector + frag.sector_count);
+            }
+
+            uint64_t current_start = current.fragments[0].start_sector;
+            uint64_t gap = (current_start > last_end) ? (current_start - last_end) : 0;
+
+            if (gap <= MAX_GAP_SECTORS) {
+                // Merge: add gap as a fragment, then add current's fragments
+                if (gap > 0) {
+                    last.fragments.push_back({last_end, gap});
+                }
+                for (auto& frag : current.fragments) {
+                    last.fragments.push_back(std::move(frag));
+                }
+                // Recalculate total size: sum all fragment sector counts
+                uint64_t total_sectors = 0;
+                for (const auto& frag : last.fragments) {
+                    total_sectors += frag.sector_count;
+                }
+                last.file_size = total_sectors * sector_size;
+                last.is_corrupted = true;
+                continue;
+            }
+        }
+
+        result.push_back(std::move(current));
+    }
+
+    return result;
 }
 
 void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
@@ -136,6 +308,7 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
     uint32_t sig_count = 0;
     uint64_t last_report_sector = config.start_sector;
     uint64_t claimed_end_sector = 0;  // Sectors already claimed by a previous file
+    std::vector<RecoverableFile> video_files;  // Buffer video files for merging
 
     for (uint64_t sector = config.start_sector;
          sector < config.end_sector;
@@ -188,7 +361,12 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
                     LOG_FMT(L"[SigScanner] Found %s at sector %llu, size=%llu",
                              sig->description.c_str(), cur_sector, file.file_size);
                 }
-                if (on_file_found) on_file_found(std::move(file));
+                // Buffer video files for merging, emit images immediately
+                if (file.file_type == FileType::Video) {
+                    video_files.push_back(std::move(file));
+                } else {
+                    if (on_file_found) on_file_found(std::move(file));
+                }
             }
         }
 
@@ -201,6 +379,12 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
 
     LOG_FMT(L"[SigScanner] RAW scan complete: signatures=%u, files_found=%llu, sectors_scanned=%llu",
              sig_count, progress.files_found, progress.sectors_scanned);
+
+    // Merge video fragments
+    auto merged = merge_video_fragments(video_files, sector_size);
+    for (auto& file : merged) {
+        if (on_file_found) on_file_found(std::move(file));
+    }
 
     progress.is_complete = true;
     if (on_progress) on_progress(progress);
@@ -239,6 +423,15 @@ bool SignatureScanner::try_recover_file(SectorReader& reader, uint64_t start_sec
         }
     }
 
+    // For MP4/MOV, try atom tree walking for accurate size determination
+    if (sig.file_type == FileType::Video &&
+        (sig.extension == L"mp4" || sig.extension == L"mov")) {
+        uint64_t atom_size = determine_mp4_size(reader, start_sector, sector_size);
+        if (atom_size > 0) {
+            estimated_size = atom_size;
+        }
+    }
+
     // Cap estimated sizes to reasonable limits
     if (sig.file_type == FileType::Image && estimated_size > 50 * 1024 * 1024) {
         estimated_size = 50 * 1024 * 1024;  // Max 50MB for images
@@ -253,17 +446,19 @@ bool SignatureScanner::try_recover_file(SectorReader& reader, uint64_t start_sec
 
     // For video files, try to read ahead and find the actual end marker
     // by scanning for the next file signature
-    if (sig.file_type == FileType::Video && file_sectors > 64) {
+    if (sig.file_type == FileType::Video) {
         // Scan in large jumps looking for the next signature or end of data
         const uint32_t PROBE_CHUNK = 64;  // 32KB jumps
         AlignedBuffer probeBuf(PROBE_CHUNK * sector_size, sector_size);
 
-        uint64_t max_sector = start_sector + file_sectors;
-        // Cap the search at a reasonable limit (1GB)
-        uint64_t search_limit = start_sector + (1024 * 1024 * 1024 / sector_size);
+        // Cap the search at a reasonable limit (2GB)
+        uint64_t search_limit = start_sector + (2ULL * 1024 * 1024 * 1024 / sector_size);
 
-        for (uint64_t probe = start_sector + file_sectors / 2;
-             probe < max_sector && probe < search_limit;
+        // Start probing from near the beginning (start_sector + 64) to find
+        // the actual end even for small files. The old approach started at
+        // file_sectors/2 which skipped past the end of small files.
+        for (uint64_t probe = start_sector + 64;
+             probe < search_limit;
              probe += PROBE_CHUNK) {
 
             if (!reader.read_sectors_checked(probe, PROBE_CHUNK, probeBuf)) {
