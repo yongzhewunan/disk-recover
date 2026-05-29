@@ -16,6 +16,7 @@ static const uint8_t MKV_PAT[]  = {0x1A, 0x45, 0xDF, 0xA3};
 static const uint8_t WMV_PAT[]  = {0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11};
 static const uint8_t FLV_PAT[]  = {0x46, 0x4C, 0x56};
 static const uint8_t MOV_PAT[]  = {0x6D, 0x6F, 0x6F, 0x76};  // at offset 4
+static const uint8_t HEIC_PAT[] = {0x66, 0x74, 0x79, 0x70};  // 'ftyp' at offset 4
 
 // RAW camera format signatures
 // Most RAW formats are TIFF-based (II* header = 0x49 0x49 0x2A 0x00)
@@ -41,6 +42,8 @@ const std::vector<FileSignatures::SignatureEntry>& FileSignatures::entries() {
         {FileType::Image, L"dng",  L"DNG (Adobe DNG)",   DNG_PAT,  4, 0},
         {FileType::Image, L"rw2",  L"RW2 (Panasonic)",   RW2_PAT,  4, 0},
         {FileType::Image, L"orf",  L"ORF (Olympus RAW)", ORF_PAT,  4, 0},
+        // HEIC/HEIF (Apple High Efficiency Image)
+        {FileType::Image, L"heic", L"HEIC (Apple HEIF)", HEIC_PAT, 4, 4},
         // Video formats
         {FileType::Video, L"mp4",  L"MP4",      MP4_PAT,  4, 4},
         {FileType::Video, L"avi",  L"AVI",      AVI_PAT,  4, 0},

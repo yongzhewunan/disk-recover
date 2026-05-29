@@ -289,6 +289,7 @@ bool PreviewManager::IsImageFile(const std::wstring& extension) noexcept {
         L".dng",                                 // Adobe DNG
         L".rw2",                                 // Panasonic RAW
         L".orf",                                 // Olympus RAW
+        L".heic", L".heif",                      // HEIC/HEIF (Apple High Efficiency Image)
     };
 
     for (const auto& supported : imageExtensions) {
