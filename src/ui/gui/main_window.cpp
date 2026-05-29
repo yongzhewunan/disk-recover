@@ -311,6 +311,7 @@ void MainWindow::OnSize(int cx, int cy) {
 
 void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
     switch (id) {
+        // Button commands
         case IDC_SCAN_BTN:
             StartScan();
             break;
@@ -323,10 +324,35 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
             StopScan();
             break;
 
+        // Menu commands
+        case IDM_SCAN:
+            StartScan();
+            break;
+
+        case IDM_RECOVER:
+            StartRecovery();
+            break;
+
         case IDM_EXIT:
             DestroyWindow(hwnd_);
             break;
 
+        case IDM_ABOUT:
+            MessageBoxW(hwnd_,
+                L"Disk Recover - Data Recovery Tool\n\n"
+                L"Version 1.0\n\n"
+                L"A Windows disk data recovery software supporting\n"
+                L"NTFS, FAT, and exFAT partitions.\n\n"
+                L"Features:\n"
+                L"- Scan disks for recoverable images and videos\n"
+                L"- Preview thumbnails before recovery\n"
+                L"- Recover files to any output folder\n"
+                L"- Supports WinPE environment",
+                L"About Disk Recover",
+                MB_OK | MB_ICONINFORMATION);
+            break;
+
+        // ComboBox notifications
         case IDC_DISK_LIST:
             if (notifyCode == CBN_SELCHANGE) {
                 // Disk selection changed - update partition list
