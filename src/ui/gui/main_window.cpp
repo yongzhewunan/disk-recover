@@ -1,4 +1,4 @@
-#include "main_window.hpp"
+﻿#include "main_window.hpp"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -44,9 +44,9 @@ static std::wstring FormatSize(uint64_t bytes) {
 // Helper: Get file type string
 static const wchar_t* FileTypeToString(FileType type) {
     switch (type) {
-        case FileType::Image: return L"Image";
-        case FileType::Video: return L"Video";
-        default: return L"Unknown";
+        case FileType::Image: return L"图片";
+        case FileType::Video: return L"视频";
+        default: return L"未知";
     }
 }
 
@@ -111,7 +111,7 @@ bool MainWindow::Create(HINSTANCE hInst, int cmdShow) {
     hwnd_ = CreateWindowExW(
         0,
         CLASS_NAME,
-        L"Disk Recover - Data Recovery Tool",
+        L"磁盘数据恢复 - Disk Recover",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         1024, 768,  // Initial size
@@ -194,13 +194,6 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             return 0;
 
-        case WM_FILE_FOUND:
-            if (lParam) {
-                self->OnFileFound(*reinterpret_cast<const RecoverableFile*>(lParam));
-                delete reinterpret_cast<const RecoverableFile*>(lParam);
-            }
-            return 0;
-
         case WM_SCAN_COMPLETE:
             self->OnScanComplete();
             return 0;
@@ -229,114 +222,90 @@ void MainWindow::OnCreate() {
         PostMessageW(hwnd_, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(p));
     });
 
-    scanManager_->set_file_found_callback([this](const RecoverableFile& file) {
-        // Post message to UI thread (allocate copy on heap)
-        RecoverableFile* f = new RecoverableFile(file);
-        PostMessageW(hwnd_, WM_FILE_FOUND, 0, reinterpret_cast<LPARAM>(f));
-    });
+    // Batch file updates via progress callback (no per-file messages)
+    scanManager_->set_file_found_callback(nullptr);
 
     LOG_MSG(L"[MainWindow] Scan callbacks set up");
 
-    // Create disk selection label
-    hDiskLabel_ = CreateLabel(hwnd_, L"Physical Disk:", MARGIN, MARGIN, 80, CONTROL_HEIGHT);
+    // Row 1: Disk and partition selection
+    int row1Y = MARGIN;
+    int col1X = MARGIN;
 
-    // Create disk selection ComboBox
-    hDiskList_ = CreateComboBox(hwnd_, IDC_DISK_LIST, MARGIN + 85, MARGIN, COMBO_WIDTH, CONTROL_HEIGHT + 200);
+    // Disk label and ComboBox
+    hDiskLabel_ = CreateLabel(hwnd_, L"磁盘:", col1X, row1Y, DISK_LABEL_W, CONTROL_HEIGHT);
+    hDiskList_ = CreateComboBox(hwnd_, IDC_DISK_LIST, col1X + DISK_LABEL_W + 4, row1Y, COMBO_WIDTH, CONTROL_HEIGHT + 200);
     LOG_FMT(L"[MainWindow] Created disk list ComboBox: hwnd=%p", hDiskList_);
+    col1X += DISK_LABEL_W + 4 + COMBO_WIDTH + MARGIN;
 
-    // Create partition label
-    hPartitionLabel_ = CreateLabel(hwnd_, L"Partition:", MARGIN + 85 + COMBO_WIDTH + MARGIN, MARGIN, 60, CONTROL_HEIGHT);
-
-    // Create partition ComboBox
-    hPartitionList_ = CreateComboBox(hwnd_, IDC_PARTITION_LIST,
-                                     MARGIN + 85 + COMBO_WIDTH + MARGIN + 65, MARGIN,
-                                     COMBO_WIDTH, CONTROL_HEIGHT + 200);
+    // Partition label and ComboBox
+    hPartitionLabel_ = CreateLabel(hwnd_, L"分区:", col1X, row1Y, PART_LABEL_W, CONTROL_HEIGHT);
+    hPartitionList_ = CreateComboBox(hwnd_, IDC_PARTITION_LIST, col1X + PART_LABEL_W + 4, row1Y, COMBO_WIDTH, CONTROL_HEIGHT + 200);
     LOG_FMT(L"[MainWindow] Created partition list ComboBox: hwnd=%p", hPartitionList_);
+    col1X += PART_LABEL_W + 4 + COMBO_WIDTH + MARGIN;
 
-    // Create Scan button
-    hScanBtn_ = CreateButton(hwnd_, L"Scan", IDC_SCAN_BTN,
-                             MARGIN + 85 + COMBO_WIDTH + MARGIN + 65 + COMBO_WIDTH + MARGIN, MARGIN,
-                             BUTTON_WIDTH, CONTROL_HEIGHT);
-
-    // Create Recover button (initially disabled)
-    hRecoverBtn_ = CreateButton(hwnd_, L"Recover", IDC_RECOVER_BTN,
-                                MARGIN + 85 + COMBO_WIDTH + MARGIN + 65 + COMBO_WIDTH + MARGIN + BUTTON_WIDTH + MARGIN, MARGIN,
-                                BUTTON_WIDTH, CONTROL_HEIGHT);
+    // Buttons
+    hScanBtn_ = CreateButton(hwnd_, L"扫描", IDC_SCAN_BTN, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
+    col1X += BUTTON_WIDTH + 6;
+    hRecoverBtn_ = CreateButton(hwnd_, L"恢复", IDC_RECOVER_BTN, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
     EnableWindow(hRecoverBtn_, FALSE);
-
-    // Create Stop button (initially disabled)
-    hStopBtn_ = CreateButton(hwnd_, L"Stop", IDM_STOP,
-                             MARGIN + 85 + COMBO_WIDTH + MARGIN + 65 + COMBO_WIDTH + MARGIN + 2 * (BUTTON_WIDTH + MARGIN), MARGIN,
-                             BUTTON_WIDTH, CONTROL_HEIGHT);
+    col1X += BUTTON_WIDTH + 6;
+    hStopBtn_ = CreateButton(hwnd_, L"停止", IDM_STOP, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
     EnableWindow(hStopBtn_, FALSE);
 
-    // Second row: Configuration controls
-    int configRowY = MARGIN + CONTROL_HEIGHT + MARGIN;
+    // Row 2: Configuration controls
+    int row2Y = row1Y + CONTROL_HEIGHT + 4;
+    int col2X = MARGIN;
 
-    // Create scan mode label
-    CreateLabel(hwnd_, L"Mode:", MARGIN, configRowY, 40, CONTROL_HEIGHT);
+    // Scan mode: ComboBox only (items include "Quick/Deep/Full" prefix)
+    hScanModeCombo_ = CreateComboBox(hwnd_, IDC_SCAN_MODE, col2X, row2Y, 110, CONTROL_HEIGHT + 200);
+    ComboBox_AddString(hScanModeCombo_, L"快速扫描");
+    ComboBox_AddString(hScanModeCombo_, L"深度扫描");
+    ComboBox_AddString(hScanModeCombo_, L"完整扫描");
+    ComboBox_SetCurSel(hScanModeCombo_, 0);
+    col2X += 110 + 8;
 
-    // Create scan mode ComboBox
-    hScanModeCombo_ = CreateComboBox(hwnd_, IDC_SCAN_MODE, MARGIN + 45, configRowY, 80, CONTROL_HEIGHT + 200);
-    ComboBox_AddString(hScanModeCombo_, L"Quick");
-    ComboBox_AddString(hScanModeCombo_, L"Deep");
-    ComboBox_AddString(hScanModeCombo_, L"Full");
-    ComboBox_SetCurSel(hScanModeCombo_, 1);  // Default to Deep
+    // File type checkboxes (no control IDs needed - we read state directly)
+    hScanImagesCheck_ = CreateWindowW(
+        L"BUTTON", L"图片", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        col2X, row2Y, 70, CONTROL_HEIGHT, hwnd_, nullptr, hInst_, nullptr);
+    Button_SetCheck(hScanImagesCheck_, BST_CHECKED);
+    col2X += 70 + 8;
 
-    // Create file type filter checkboxes
-    hScanImagesCheck_ = CreateWindowExW(
-        0, L"BUTTON", L"Images",
-        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-        MARGIN + 45 + 80 + MARGIN + 10, configRowY, 70, CONTROL_HEIGHT,
-        hwnd_, reinterpret_cast<HMENU>(IDC_SCAN_IMAGES), hInst_, nullptr);
-    Button_SetCheck(hScanImagesCheck_, BST_CHECKED);  // Default checked
+    hScanVideosCheck_ = CreateWindowW(
+        L"BUTTON", L"视频", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        col2X, row2Y, 70, CONTROL_HEIGHT, hwnd_, nullptr, hInst_, nullptr);
+    Button_SetCheck(hScanVideosCheck_, BST_CHECKED);
+    col2X += 70 + 8;
 
-    hScanVideosCheck_ = CreateWindowExW(
-        0, L"BUTTON", L"Videos",
-        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-        MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN, configRowY, 70, CONTROL_HEIGHT,
-        hwnd_, reinterpret_cast<HMENU>(IDC_SCAN_VIDEOS), hInst_, nullptr);
-    Button_SetCheck(hScanVideosCheck_, BST_CHECKED);  // Default checked
+    // Bad sector policy label and combo
+    CreateLabel(hwnd_, L"Bad Sectors:", col2X, row2Y, 75, CONTROL_HEIGHT);
+    hBadSectorCombo_ = CreateComboBox(hwnd_, IDC_BAD_SECTOR_POLICY, col2X + 75 + 4, row2Y, 120, CONTROL_HEIGHT + 200);
+    ComboBox_AddString(hBadSectorCombo_, L"跳过");
+    ComboBox_AddString(hBadSectorCombo_, L"重试3次");
+    ComboBox_AddString(hBadSectorCombo_, L"尽力读取");
+    ComboBox_SetCurSel(hBadSectorCombo_, 0);
+    col2X += 75 + 4 + 120 + 8;
 
-    // Create bad sector policy label
-    CreateLabel(hwnd_, L"Bad Sectors:", MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN, configRowY, 70, CONTROL_HEIGHT);
+    // Bad sector count panel
+    hBadSectorPanel_ = CreateWindowW(
+        L"STATIC", L"Bad: 0",
+        WS_VISIBLE | WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_SUNKEN,
+        col2X, row2Y, 90, CONTROL_HEIGHT,
+        hwnd_, nullptr, hInst_, nullptr);
 
-    // Create bad sector policy ComboBox
-    hBadSectorCombo_ = CreateComboBox(hwnd_, IDC_BAD_SECTOR_POLICY,
-                                       MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN + 75, configRowY,
-                                       80, CONTROL_HEIGHT + 200);
-    ComboBox_AddString(hBadSectorCombo_, L"Skip");
-    ComboBox_AddString(hBadSectorCombo_, L"Retry");
-    ComboBox_AddString(hBadSectorCombo_, L"Force");
-    ComboBox_SetCurSel(hBadSectorCombo_, 0);  // Default to Skip
-
-    // Create bad sector info panel (static text showing bad sector count)
-    hBadSectorPanel_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
-        L"STATIC", L"Bad Sectors: 0",
-        WS_VISIBLE | WS_CHILD | SS_LEFT | SS_CENTERIMAGE,
-        MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN + 80 + MARGIN, configRowY,
-        120, CONTROL_HEIGHT,
-        hwnd_, reinterpret_cast<HMENU>(IDC_BAD_SECTOR_PANEL), hInst_, nullptr);
-    if (!hBadSectorPanel_) {
-        OutputDebugStringW(L"[DiskRecover] Failed to create bad sector panel\n");
-    }
-
-    // Create file list ListView
-    int fileListY = configRowY + CONTROL_HEIGHT + MARGIN;
-    hFileList_ = CreateListView(hwnd_, IDC_FILE_LIST, MARGIN, fileListY, 600, 400);
+    // Row 3: File list and preview (starts after config row)
+    int row3Y = row2Y + CONTROL_HEIGHT + 4;
+    hFileList_ = CreateListView(hwnd_, IDC_FILE_LIST, MARGIN, row3Y, 700, 400);
     SetupListViewColumns();
 
-    // Create preview label
-    hPreviewLabel_ = CreateLabel(hwnd_, L"Preview:", MARGIN + 600 + MARGIN, fileListY, PREVIEW_WIDTH, CONTROL_HEIGHT);
-
-    // Create preview static control
+    // Preview panel on the right
+    hPreviewLabel_ = CreateLabel(hwnd_, L"预览:", MARGIN + 700 + MARGIN, row3Y, PREVIEW_WIDTH, CONTROL_HEIGHT);
     hPreview_ = CreateStatic(hwnd_, IDC_PREVIEW,
-                             MARGIN + 600 + MARGIN, fileListY + CONTROL_HEIGHT + MARGIN,
+                             MARGIN + 700 + MARGIN, row3Y + CONTROL_HEIGHT + 4,
                              PREVIEW_WIDTH, PREVIEW_WIDTH);
     SetWindowTextW(hPreview_, L"No preview");
 
-    // Create status bar
+    // Status bar
     hStatusBar_ = CreateStatusBar(hwnd_, IDC_STATUSBAR);
 
     LOG_MSG(L"[MainWindow] UI controls created, calling RefreshDiskList");
@@ -346,36 +315,40 @@ void MainWindow::OnCreate() {
 
     LOG_FMT(L"[MainWindow] RefreshDiskList completed, %zu disks found", cachedDisks_.size());
 
-    std::wstring statusMsg = L"Ready. Log file: " + Logger::instance().getLogPath();
-    UpdateStatus(statusMsg.c_str());
+    UpdateStatus(L"Ready. Select a disk and click Scan.");
 }
 
 void MainWindow::OnSize(int cx, int cy) {
     if (!hFileList_) return;  // Controls not created yet
 
-    // Account for two rows: disk selection row + configuration row
-    int topRowHeight = MARGIN + CONTROL_HEIGHT + MARGIN + CONTROL_HEIGHT + MARGIN;
-    int bottomRowY = cy - STATUSBAR_HEIGHT - MARGIN;
+    // Calculate file list area
+    // Two header rows: disk/partition row + config row
+    int headerHeight = 2 * (CONTROL_HEIGHT + 4) + MARGIN;
+    int fileListY = headerHeight;
+    int bottomY = cy - STATUSBAR_HEIGHT - 4;
 
-    // Resize file list to fill available space
-    int fileListWidth = cx - MARGIN - PREVIEW_WIDTH - 3 * MARGIN;
-    int fileListHeight = bottomRowY - topRowHeight - MARGIN;
-    SetWindowPos(hFileList_, nullptr, MARGIN, topRowHeight, fileListWidth, fileListHeight,
+    // File list width - leave space for preview
+    int fileListWidth = cx - PREVIEW_WIDTH - 3 * MARGIN;
+    int fileListHeight = bottomY - fileListY - 4;
+
+    // Resize file list
+    SetWindowPos(hFileList_, nullptr, MARGIN, fileListY,
+                 std::max(100, fileListWidth), std::max(100, fileListHeight),
                  SWP_NOZORDER | SWP_NOACTIVATE);
 
     // Move preview controls
     int previewX = MARGIN + fileListWidth + 2 * MARGIN;
-    SetWindowPos(hPreviewLabel_, nullptr, previewX, topRowHeight, PREVIEW_WIDTH, CONTROL_HEIGHT,
+    SetWindowPos(hPreviewLabel_, nullptr, previewX, fileListY, PREVIEW_WIDTH, CONTROL_HEIGHT,
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(hPreview_, nullptr, previewX, topRowHeight + CONTROL_HEIGHT + MARGIN,
-                 PREVIEW_WIDTH, fileListHeight - CONTROL_HEIGHT - MARGIN,
+    SetWindowPos(hPreview_, nullptr, previewX, fileListY + CONTROL_HEIGHT + 4,
+                 PREVIEW_WIDTH, std::max(100, fileListHeight - CONTROL_HEIGHT - 4),
                  SWP_NOZORDER | SWP_NOACTIVATE);
 
     // Resize status bar
     SetWindowPos(hStatusBar_, nullptr, 0, cy - STATUSBAR_HEIGHT, cx, STATUSBAR_HEIGHT,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 
-    // Move progress bar within status bar (if exists)
+    // Move progress bar within status bar
     if (hProgressBar_) {
         RECT rcStatus;
         GetClientRect(hStatusBar_, &rcStatus);
@@ -470,6 +443,25 @@ void MainWindow::OnNotify(LPNMHDR nmhdr) {
 }
 
 void MainWindow::OnScanProgress(const ScanProgress& progress) {
+    // Batch-add any new files found since last update
+    if (scanManager_) {
+        auto newFiles = scanManager_->take_found_files();
+        if (!newFiles.empty()) {
+            // Suspend redraw during batch insert to prevent UI freeze
+            SendMessageW(hFileList_, WM_SETREDRAW, FALSE, 0);
+            for (const auto& file : newFiles) {
+                foundFiles_.push_back(file);
+                AddListViewItem(file);
+            }
+            SendMessageW(hFileList_, WM_SETREDRAW, TRUE, 0);
+            InvalidateRect(hFileList_, nullptr, TRUE);
+
+            if (!IsWindowEnabled(hRecoverBtn_)) {
+                EnableWindow(hRecoverBtn_, TRUE);
+            }
+        }
+    }
+
     // Check if scan is complete
     if (progress.is_complete) {
         OnScanComplete();
@@ -486,26 +478,15 @@ void MainWindow::OnScanProgress(const ScanProgress& progress) {
     badSectorsCount_ = progress.bad_sectors_hit;
     if (hBadSectorPanel_) {
         wchar_t badSectorText[64];
-        _snwprintf_s(badSectorText, _TRUNCATE, L"Bad Sectors: %u", progress.bad_sectors_hit);
+        _snwprintf_s(badSectorText, _TRUNCATE, L"Bad: %u", progress.bad_sectors_hit);
         SetWindowTextW(hBadSectorPanel_, badSectorText);
     }
 
     // Update status text
     wchar_t status[256];
-    _snwprintf_s(status, _TRUNCATE, L"Scanning... %llu/%llu sectors, %u files found",
-                 progress.sectors_scanned, progress.total_sectors, progress.files_found);
+    _snwprintf_s(status, _TRUNCATE, L"扫描中... %llu/%llu 扇区, 已找到 %zu 个文件",
+                 progress.sectors_scanned, progress.total_sectors, foundFiles_.size());
     UpdateStatus(status);
-}
-
-void MainWindow::OnFileFound(const RecoverableFile& file) {
-    // Add file to list
-    foundFiles_.push_back(file);
-    AddListViewItem(file);
-
-    // Enable recover button if we have files
-    if (foundFiles_.size() == 1) {
-        EnableWindow(hRecoverBtn_, TRUE);
-    }
 }
 
 void MainWindow::OnScanComplete() {
@@ -856,7 +837,7 @@ const PartitionInfo* MainWindow::GetSelectedPartition() const {
 void MainWindow::StartScan() {
     const DiskInfo* disk = GetSelectedDisk();
     if (!disk) {
-        MessageBoxW(hwnd_, L"Please select a disk first.", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd_, L"请先选择一个磁盘。", L"错误", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -865,64 +846,64 @@ void MainWindow::StartScan() {
     UpdateProgress(0);
     badSectorsCount_ = 0;
 
-    // Reset bad sector count display
     if (hBadSectorPanel_) {
-        SetWindowTextW(hBadSectorPanel_, L"Bad Sectors: 0");
+        SetWindowTextW(hBadSectorPanel_, L"Bad: 0");
     }
 
-    // Configure scan from UI controls
+    // Configure scan
     ScanManager::Config config;
     config.device_path = disk->device_path;
     config.db_path = GetTempDbPath();
     config.session_id = GenerateSessionId();
 
-    // Get scan mode from ComboBox
     int modeIdx = ComboBox_GetCurSel(hScanModeCombo_);
     config.mode = static_cast<ScanMode>(modeIdx);
 
-    // Get bad sector policy from ComboBox
     int policyIdx = ComboBox_GetCurSel(hBadSectorCombo_);
     config.bad_sector_policy = static_cast<BadSectorPolicy>(policyIdx);
 
-    // Get file type filters from checkboxes
     config.scan_images = (Button_GetCheck(hScanImagesCheck_) == BST_CHECKED);
     config.scan_videos = (Button_GetCheck(hScanVideosCheck_) == BST_CHECKED);
 
-    // If a partition is selected, limit scan to that partition
     const PartitionInfo* part = GetSelectedPartition();
     if (part && part->sector_count > 0) {
         config.start_sector = part->start_sector;
         config.end_sector = part->start_sector + part->sector_count;
+        LOG_FMT(L"[MainWindow] Scan partition: start=%llu, count=%llu, fs=%s",
+                 part->start_sector, part->sector_count, part->filesystem_type.c_str());
     } else {
-        // Scan entire disk - but limit to reasonable range for testing
         config.start_sector = 0;
         config.end_sector = disk->geometry.total_sectors;
+        LOG_FMT(L"[MainWindow] Scan entire disk: total_sectors=%llu", disk->geometry.total_sectors);
     }
 
-    // Debug output
-    wchar_t debugMsg[256];
-    _snwprintf_s(debugMsg, _TRUNCATE, L"[MainWindow] Starting scan: %s, sectors %llu to %llu\n",
-                 disk->device_path.c_str(), config.start_sector, config.end_sector);
-    OutputDebugStringW(debugMsg);
+    LOG_FMT(L"[MainWindow] Scan config: path=%s, mode=%d, images=%d, videos=%d, start=%llu, end=%llu",
+             config.device_path.c_str(), static_cast<int>(config.mode),
+             config.scan_images, config.scan_videos,
+             config.start_sector, config.end_sector);
 
-    // Start scan
     if (!scanManager_->start_scan(config)) {
-        OutputDebugStringW(L"[MainWindow] start_scan returned false\n");
-        MessageBoxW(hwnd_, L"Failed to start scan.", L"Error", MB_OK | MB_ICONERROR);
+        LOG_MSG(L"[MainWindow] start_scan FAILED");
+        MessageBoxW(hwnd_, L"无法启动扫描。", L"错误", MB_OK | MB_ICONERROR);
         return;
     }
 
-    OutputDebugStringW(L"[MainWindow] Scan started successfully\n");
+    LOG_MSG(L"[MainWindow] Scan started successfully");
     EnableControls(true);
-    UpdateStatus(L"Starting scan...");
+    UpdateStatus(L"扫描中...");
 }
 
 void MainWindow::StopScan() {
-    if (scanManager_ && scanManager_->is_scanning()) {
-        scanManager_->stop_scan();
-        UpdateStatus(L"Scan stopped.");
-        EnableControls(false);
-    }
+    if (!scanManager_ || !scanManager_->is_scanning()) return;
+
+    LOG_MSG(L"[MainWindow] Stop scan requested");
+
+    // Only set the stop flag - the scan thread handles cleanup
+    scanManager_->stop_scan();
+
+    // Wait briefly for the scan thread to finish (it's detached, so we
+    // just update UI and let the scan thread send WM_SCAN_COMPLETE when done)
+    UpdateStatus(L"正在停止扫描...");
 }
 
 void MainWindow::StartRecovery() {

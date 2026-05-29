@@ -5,12 +5,12 @@
 #include "../filesystem/ntfs/mft_parser.hpp"
 #include "../filesystem/fat/fat_parser.hpp"
 #include "../filesystem/exfat/exfat_parser.hpp"
+#include "../common/logger.hpp"
 #include <thread>
 #include <cstring>
 
 namespace disk_recover {
 
-// Helper function to detect file system type from boot sector
 static FileSystemType detect_filesystem(SectorReader& reader, uint64_t partition_start) {
     AlignedBuffer buf(reader.sector_size(), reader.sector_size());
     if (!reader.read_sectors(partition_start, 1, buf)) {
@@ -19,26 +19,21 @@ static FileSystemType detect_filesystem(SectorReader& reader, uint64_t partition
 
     const uint8_t* data = buf.data();
 
-    // Check boot sector signature
     uint16_t signature = *reinterpret_cast<const uint16_t*>(data + 510);
     if (signature != 0xAA55) {
         return FileSystemType::Unknown;
     }
 
-    // Check for exFAT: "EXFAT   " at offset 3
     const char exfat_id[] = "EXFAT   ";
     if (std::memcmp(data + 3, exfat_id, 8) == 0) {
         return FileSystemType::ExFAT;
     }
 
-    // Check for NTFS: "NTFS    " at offset 3
     const char ntfs_id[] = "NTFS    ";
     if (std::memcmp(data + 3, ntfs_id, 8) == 0) {
         return FileSystemType::NTFS;
     }
 
-    // Check for FAT file system
-    // FAT has BPB (BIOS Parameter Block) structure
     uint16_t bytes_per_sector = *reinterpret_cast<const uint16_t*>(data + 11);
     uint8_t sectors_per_cluster = data[13];
 
@@ -47,7 +42,6 @@ static FileSystemType detect_filesystem(SectorReader& reader, uint64_t partition
         return FileSystemType::Unknown;
     }
 
-    // Determine FAT type based on cluster count
     uint16_t reserved_sectors = *reinterpret_cast<const uint16_t*>(data + 14);
     uint8_t fat_count = data[16];
     uint16_t root_entry_count = *reinterpret_cast<const uint16_t*>(data + 17);
@@ -93,14 +87,12 @@ bool ScanManager::resume_scan(const Config& config) {
         return false;
     }
 
-    // Load previous progress
     ScanProgress saved_progress;
     if (!cache_db_.load_progress(config.session_id, saved_progress)) {
         cache_db_.close();
         return false;
     }
 
-    // Check if already complete
     if (saved_progress.is_complete) {
         cache_db_.close();
         return false;
@@ -112,7 +104,6 @@ bool ScanManager::resume_scan(const Config& config) {
     progress_ = saved_progress;
     current_session_id_ = config.session_id;
 
-    // Create a modified config with the resume position
     Config resume_config = config;
     resume_config.start_sector = saved_progress.sectors_scanned;
 
@@ -121,13 +112,12 @@ bool ScanManager::resume_scan(const Config& config) {
 }
 
 void ScanManager::pause_scan() { paused_ = true; }
-void ScanManager::resume_scan() { paused_ = false; }
+void ScanManager::resume_from_pause() { paused_ = false; }
 
+// IMPORTANT: stop_scan() only sets the flag. All cleanup (flush, close DB)
+// happens in scan_thread_func when it sees the flag. This avoids races.
 void ScanManager::stop_scan() {
     stop_requested_ = true;
-    scanning_ = false;
-    flush_cache(current_session_id_);
-    cache_db_.close();
 }
 
 ScanProgress ScanManager::progress() const {
@@ -135,13 +125,19 @@ ScanProgress ScanManager::progress() const {
     return progress_;
 }
 
+std::vector<RecoverableFile> ScanManager::take_found_files() {
+    std::lock_guard lock(files_mutex_);
+    std::vector<RecoverableFile> result;
+    result.swap(ui_files_);
+    return result;
+}
+
 void ScanManager::scan_thread_func(Config config) {
     DiskHandle handle;
     if (!handle.open(config.device_path)) {
-        OutputDebugStringW(L"[ScanManager] Failed to open disk\n");
+        LOG_FMT(L"[ScanManager] Failed to open disk: %s", config.device_path.c_str());
         scanning_ = false;
         cache_db_.close();
-        // Notify completion even on failure
         if (on_progress_) {
             ScanProgress p{};
             p.is_complete = true;
@@ -150,8 +146,11 @@ void ScanManager::scan_thread_func(Config config) {
         return;
     }
 
+    LOG_FMT(L"[ScanManager] Opened disk: %s", config.device_path.c_str());
+
     DiskGeometry geo{};
     DiskInfoQuery::QueryDiskGeometry(handle, geo);
+    LOG_FMT(L"[ScanManager] Disk geometry: sector_size=%u, total_sectors=%llu", geo.sector_size, geo.total_sectors);
 
     SectorReader reader(handle, geo.sector_size);
     BadSectorManager bad_mgr;
@@ -160,7 +159,14 @@ void ScanManager::scan_thread_func(Config config) {
 
     uint64_t start_sector = config.start_sector;
     uint64_t end_sector = (config.end_sector > 0) ? config.end_sector : geo.total_sectors;
-    progress_.total_sectors = end_sector - start_sector;
+
+    {
+        std::lock_guard lock(progress_mutex_);
+        progress_.total_sectors = end_sector - start_sector;
+    }
+
+    LOG_FMT(L"[ScanManager] Scan range: sector %llu to %llu (%llu sectors)",
+             start_sector, end_sector, progress_.total_sectors);
 
     auto on_file = [this](RecoverableFile&& file) {
         if (stop_requested_.load()) return;
@@ -168,11 +174,14 @@ void ScanManager::scan_thread_func(Config config) {
             std::lock_guard lock(progress_mutex_);
             progress_.files_found++;
         }
-        pending_files_.push_back(std::move(file));
-        if (pending_files_.size() >= FLUSH_THRESHOLD) {
-            flush_cache(current_session_id_);
+        {
+            std::lock_guard lock(files_mutex_);
+            ui_files_.push_back(file);  // Copy for UI
+            pending_files_.push_back(std::move(file));
+            if (pending_files_.size() >= FLUSH_THRESHOLD) {
+                flush_cache(current_session_id_);
+            }
         }
-        if (on_file_found_) on_file_found_(pending_files_.back());
     };
 
     auto on_scan_progress = [this](const ScanProgress& p) {
@@ -189,169 +198,186 @@ void ScanManager::scan_thread_func(Config config) {
         if (on_progress_) on_progress_(progress_);
     };
 
-    OutputDebugStringW(L"[ScanManager] Starting scan...\n");
+    LOG_FMT(L"[ScanManager] Starting scan mode=%d, images=%d, videos=%d",
+             static_cast<int>(config.mode), config.scan_images, config.scan_videos);
 
-    switch (config.mode) {
-    case ScanMode::Quick:
-        // Quick: Only file system metadata, no RAW scanning
-        OutputDebugStringW(L"[ScanManager] Quick scan mode - file system metadata only\n");
-        {
-            FileSystemType fs_type = detect_filesystem(reader, start_sector);
-            OutputDebugStringW(L"[ScanManager] Detected file system type\n");
+    if (!stop_requested_.load()) {
+        switch (config.mode) {
+        case ScanMode::Quick:
+            LOG_MSG(L"[ScanManager] Quick scan mode");
+            {
+                FileSystemType fs_type = detect_filesystem(reader, start_sector);
+                LOG_FMT(L"[ScanManager] Detected file system type: %d", static_cast<int>(fs_type));
 
-            switch (fs_type) {
-            case FileSystemType::NTFS:
-                {
-                    ntfs::MftParser parser;
-                    if (parser.parse_boot_sector(reader, start_sector)) {
-                        OutputDebugStringW(L"[ScanManager] Parsing NTFS MFT...\n");
-                        parser.enumerate_mft(reader, on_file, true);
-                        {
-                            std::lock_guard lock(progress_mutex_);
-                            progress_.sectors_scanned = parser.mft_start_sector() +
+                switch (fs_type) {
+                case FileSystemType::NTFS:
+                    {
+                        ntfs::MftParser parser;
+                        if (parser.parse_boot_sector(reader, start_sector)) {
+                            LOG_MSG(L"[ScanManager] Parsing NTFS MFT...");
+                            parser.enumerate_mft(reader, on_file, true);
+                            {
+                                std::lock_guard lock(progress_mutex_);
+                                progress_.sectors_scanned = parser.mft_start_sector() +
+                                    (geo.total_sectors / parser.mft_record_size());
+                            }
+                            LOG_FMT(L"[ScanManager] NTFS scan done, files_found=%llu", progress_.files_found);
+                        } else {
+                            LOG_MSG(L"[ScanManager] Failed to parse NTFS boot sector");
+                        }
+                    }
+                    break;
+
+                case FileSystemType::FAT12:
+                case FileSystemType::FAT16:
+                case FileSystemType::FAT32:
+                    {
+                        fat::FatParser parser;
+                        if (parser.parse_boot_sector(reader, start_sector)) {
+                            LOG_MSG(L"[ScanManager] Parsing FAT root directory...");
+                            parser.enumerate_root_dir(reader, on_file, true);
+                            {
+                                std::lock_guard lock(progress_mutex_);
+                                progress_.sectors_scanned = parser.data_start_sector();
+                            }
+                            LOG_FMT(L"[ScanManager] FAT scan done, files_found=%llu", progress_.files_found);
+                        } else {
+                            LOG_MSG(L"[ScanManager] Failed to parse FAT boot sector");
+                        }
+                    }
+                    break;
+
+                case FileSystemType::ExFAT:
+                    LOG_MSG(L"[ScanManager] exFAT detected - using RAW scan fallback");
+                    {
+                        SignatureScanner scanner;
+                        SignatureScanner::ScanConfig scan_config{};
+                        scan_config.start_sector = start_sector;
+                        scan_config.end_sector = end_sector;
+                        scan_config.scan_images = config.scan_images;
+                        scan_config.scan_videos = config.scan_videos;
+                        scan_config.should_stop = [this]() { return stop_requested_.load(); };
+                        scanner.scan(reader, scan_config, on_file, on_scan_progress);
+                    }
+                    break;
+
+                case FileSystemType::Unknown:
+                    LOG_MSG(L"[ScanManager] Unknown file system - performing RAW scan");
+                    {
+                        SignatureScanner scanner;
+                        SignatureScanner::ScanConfig scan_config{};
+                        scan_config.start_sector = start_sector;
+                        scan_config.end_sector = end_sector;
+                        scan_config.scan_images = config.scan_images;
+                        scan_config.scan_videos = config.scan_videos;
+                        scan_config.should_stop = [this]() { return stop_requested_.load(); };
+                        scanner.scan(reader, scan_config, on_file, on_scan_progress);
+                    }
+                    break;
+                }
+            }
+            break;
+
+        case ScanMode::Deep:
+            LOG_MSG(L"[ScanManager] Deep scan mode");
+            {
+                FileSystemType fs_type = detect_filesystem(reader, start_sector);
+                LOG_FMT(L"[ScanManager] Detected file system type: %d", static_cast<int>(fs_type));
+                uint64_t metadata_end_sector = 0;
+
+                switch (fs_type) {
+                case FileSystemType::NTFS:
+                    {
+                        ntfs::MftParser parser;
+                        if (parser.parse_boot_sector(reader, start_sector)) {
+                            LOG_MSG(L"[ScanManager] Phase 1: Parsing NTFS MFT...");
+                            parser.enumerate_mft(reader, on_file, true);
+                            metadata_end_sector = parser.mft_start_sector() +
                                 (geo.total_sectors / parser.mft_record_size());
+                            {
+                                std::lock_guard lock(progress_mutex_);
+                                progress_.sectors_scanned = metadata_end_sector;
+                            }
+                            if (on_progress_) on_progress_(progress_);
                         }
                     }
-                }
-                break;
+                    break;
 
-            case FileSystemType::FAT12:
-            case FileSystemType::FAT16:
-            case FileSystemType::FAT32:
-                {
-                    fat::FatParser parser;
-                    if (parser.parse_boot_sector(reader, start_sector)) {
-                        OutputDebugStringW(L"[ScanManager] Parsing FAT root directory...\n");
-                        parser.enumerate_root_dir(reader, on_file, true);
-                        {
-                            std::lock_guard lock(progress_mutex_);
-                            progress_.sectors_scanned = parser.data_start_sector();
+                case FileSystemType::FAT12:
+                case FileSystemType::FAT16:
+                case FileSystemType::FAT32:
+                    {
+                        fat::FatParser parser;
+                        if (parser.parse_boot_sector(reader, start_sector)) {
+                            LOG_MSG(L"[ScanManager] Phase 1: Parsing FAT root directory...");
+                            parser.enumerate_root_dir(reader, on_file, true);
+                            metadata_end_sector = parser.data_start_sector();
+                            {
+                                std::lock_guard lock(progress_mutex_);
+                                progress_.sectors_scanned = metadata_end_sector;
+                            }
+                            if (on_progress_) on_progress_(progress_);
                         }
                     }
-                }
-                break;
+                    break;
 
-            case FileSystemType::ExFAT:
-                // exFAT parser doesn't have enumerate method yet
-                // Fall through to full scan for now
-                OutputDebugStringW(L"[ScanManager] exFAT detected - using RAW scan fallback\n");
-                {
+                case FileSystemType::ExFAT:
+                case FileSystemType::Unknown:
+                    metadata_end_sector = start_sector;
+                    break;
+                }
+
+                if (metadata_end_sector < end_sector && !stop_requested_.load()) {
+                    LOG_FMT(L"[ScanManager] Phase 2: RAW scan sectors %llu to %llu",
+                             metadata_end_sector, end_sector);
                     SignatureScanner scanner;
                     SignatureScanner::ScanConfig scan_config{};
-                    scan_config.start_sector = start_sector;
+                    scan_config.start_sector = metadata_end_sector;
                     scan_config.end_sector = end_sector;
                     scan_config.scan_images = config.scan_images;
                     scan_config.scan_videos = config.scan_videos;
+                    scan_config.should_stop = [this]() { return stop_requested_.load(); };
                     scanner.scan(reader, scan_config, on_file, on_scan_progress);
                 }
-                break;
-
-            case FileSystemType::Unknown:
-                OutputDebugStringW(L"[ScanManager] Unknown file system - performing RAW scan\n");
-                {
-                    SignatureScanner scanner;
-                    SignatureScanner::ScanConfig scan_config{};
-                    scan_config.start_sector = start_sector;
-                    scan_config.end_sector = end_sector;
-                    scan_config.scan_images = config.scan_images;
-                    scan_config.scan_videos = config.scan_videos;
-                    scanner.scan(reader, scan_config, on_file, on_scan_progress);
-                }
-                break;
             }
-        }
-        break;
+            break;
 
-    case ScanMode::Deep:
-        // Deep: Quick scan first (file system metadata), then RAW on free space
-        OutputDebugStringW(L"[ScanManager] Deep scan mode - metadata + RAW on free space\n");
-        {
-            // Phase 1: Quick scan (file system metadata)
-            FileSystemType fs_type = detect_filesystem(reader, start_sector);
-            uint64_t metadata_end_sector = 0;
-
-            switch (fs_type) {
-            case FileSystemType::NTFS:
-                {
-                    ntfs::MftParser parser;
-                    if (parser.parse_boot_sector(reader, start_sector)) {
-                        OutputDebugStringW(L"[ScanManager] Phase 1: Parsing NTFS MFT...\n");
-                        parser.enumerate_mft(reader, on_file, true);
-                        metadata_end_sector = parser.mft_start_sector() +
-                            (geo.total_sectors / parser.mft_record_size());
-                        {
-                            std::lock_guard lock(progress_mutex_);
-                            progress_.sectors_scanned = metadata_end_sector;
-                        }
-                        if (on_progress_) on_progress_(progress_);
-                    }
-                }
-                break;
-
-            case FileSystemType::FAT12:
-            case FileSystemType::FAT16:
-            case FileSystemType::FAT32:
-                {
-                    fat::FatParser parser;
-                    if (parser.parse_boot_sector(reader, start_sector)) {
-                        OutputDebugStringW(L"[ScanManager] Phase 1: Parsing FAT root directory...\n");
-                        parser.enumerate_root_dir(reader, on_file, true);
-                        metadata_end_sector = parser.data_start_sector();
-                        {
-                            std::lock_guard lock(progress_mutex_);
-                            progress_.sectors_scanned = metadata_end_sector;
-                        }
-                        if (on_progress_) on_progress_(progress_);
-                    }
-                }
-                break;
-
-            case FileSystemType::ExFAT:
-            case FileSystemType::Unknown:
-                OutputDebugStringW(L"[ScanManager] Unknown/exFAT file system - proceeding to RAW scan\n");
-                metadata_end_sector = start_sector;
-                break;
-            }
-
-            // Phase 2: RAW signature scan on remaining sectors (free space approximation)
-            // For simplicity, we scan from metadata_end_sector to end_sector
-            // A more sophisticated implementation would track allocated clusters
-            if (metadata_end_sector < end_sector && !stop_requested_.load()) {
-                OutputDebugStringW(L"[ScanManager] Phase 2: RAW scan on remaining sectors...\n");
+        case ScanMode::Full:
+            LOG_MSG(L"[ScanManager] Full scan mode - entire disk RAW scan");
+            {
                 SignatureScanner scanner;
                 SignatureScanner::ScanConfig scan_config{};
-                scan_config.start_sector = metadata_end_sector;
+                scan_config.start_sector = start_sector;
                 scan_config.end_sector = end_sector;
                 scan_config.scan_images = config.scan_images;
                 scan_config.scan_videos = config.scan_videos;
+                scan_config.should_stop = [this]() { return stop_requested_.load(); };
                 scanner.scan(reader, scan_config, on_file, on_scan_progress);
             }
+            break;
         }
-        break;
-
-    case ScanMode::Full:
-        // Full: Entire disk RAW sector-by-sector signature scanning
-        OutputDebugStringW(L"[ScanManager] Full scan mode - entire disk RAW scan\n");
-        {
-            SignatureScanner scanner;
-            SignatureScanner::ScanConfig scan_config{};
-            scan_config.start_sector = start_sector;
-            scan_config.end_sector = end_sector;
-            scan_config.scan_images = config.scan_images;
-            scan_config.scan_videos = config.scan_videos;
-            scanner.scan(reader, scan_config, on_file, on_scan_progress);
-        }
-        break;
     }
 
-    flush_cache(current_session_id_);
-    progress_.is_complete = true;
+    // All cleanup happens HERE in the scan thread, not in stop_scan()
+    {
+        std::lock_guard lock(files_mutex_);
+        flush_cache(current_session_id_);
+    }
+
+    {
+        std::lock_guard lock(progress_mutex_);
+        progress_.is_complete = true;
+    }
+
     cache_db_.save_progress(current_session_id_, progress_);
     cache_db_.close();
     scanning_ = false;
 
-    OutputDebugStringW(L"[ScanManager] Scan complete\n");
-    // Final progress update to signal completion
+    LOG_FMT(L"[ScanManager] Scan done: files_found=%llu, sectors=%llu, bad=%llu, stopped=%d",
+             progress_.files_found, progress_.sectors_scanned, progress_.bad_sectors_hit,
+             stop_requested_.load());
+
+    // Final notification to UI (thread-safe via PostMessage)
     if (on_progress_) on_progress_(progress_);
 }
 

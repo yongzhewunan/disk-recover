@@ -82,18 +82,25 @@ private:
     std::vector<RecoverableFile> foundFiles_;  // Files found during scan
     uint32_t badSectorsCount_ = 0;  // Bad sectors detected during scan
 
+    // ListView column indices
+    enum { COL_NAME = 0, COL_SIZE = 1, COL_TYPE = 2, COL_STATUS = 3, COL_PATH = 4 };
+
     // Layout constants
     static constexpr int MARGIN = 8;
     static constexpr int CONTROL_HEIGHT = 24;
     static constexpr int BUTTON_WIDTH = 80;
-    static constexpr int COMBO_WIDTH = 200;
-    static constexpr int PREVIEW_WIDTH = 200;
+    static constexpr int COMBO_WIDTH = 220;
+    static constexpr int PREVIEW_WIDTH = 220;
     static constexpr int STATUSBAR_HEIGHT = 24;
+    static constexpr int DISK_LABEL_W = 45;     // "Disk:" label width
+    static constexpr int PART_LABEL_W = 70;      // "Partition:" label width
 
     // Custom message for thread-safe UI updates
     static constexpr UINT WM_SCAN_PROGRESS = WM_USER + 1;
-    static constexpr UINT WM_FILE_FOUND = WM_USER + 2;
-    static constexpr UINT WM_SCAN_COMPLETE = WM_USER + 3;
+    static constexpr UINT WM_SCAN_COMPLETE = WM_USER + 2;
+
+    // Batch update tracking
+    uint32_t lastDisplayedFileCount_ = 0;  // Files already shown in ListView
 
     // Message handlers
     void OnCreate();
@@ -102,7 +109,6 @@ private:
     void OnDestroy();
     void OnNotify(LPNMHDR nmhdr);
     void OnScanProgress(const ScanProgress& progress);
-    void OnFileFound(const RecoverableFile& file);
     void OnScanComplete();
 
     // Control creation helpers

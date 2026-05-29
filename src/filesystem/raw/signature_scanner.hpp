@@ -14,6 +14,7 @@ public:
         uint32_t step_sectors = 1;
         bool scan_images = true;
         bool scan_videos = true;
+        std::function<bool()> should_stop;  // Called to check if scan should stop
     };
 
     void scan(SectorReader& reader, const ScanConfig& config,
