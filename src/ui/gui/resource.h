@@ -14,6 +14,10 @@
 #define IDC_SCAN_BTN        1006    // Scan button
 #define IDC_RECOVER_BTN     1007    // Recover button
 #define IDC_PARTITION_LIST  1008    // ComboBox for partition selection
+#define IDC_SCAN_MODE       1010    // ComboBox for scan mode selection
+#define IDC_SCAN_IMAGES     1011    // Checkbox for image file filter
+#define IDC_SCAN_VIDEOS     1012    // Checkbox for video file filter
+#define IDC_BAD_SECTOR_POLICY 1013  // ComboBox for bad sector policy
 
 // Menu command IDs (2000-2999)
 #define IDM_SCAN            2001

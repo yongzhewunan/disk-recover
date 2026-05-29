@@ -256,8 +256,48 @@ void MainWindow::OnCreate() {
                              BUTTON_WIDTH, CONTROL_HEIGHT);
     EnableWindow(hStopBtn_, FALSE);
 
+    // Second row: Configuration controls
+    int configRowY = MARGIN + CONTROL_HEIGHT + MARGIN;
+
+    // Create scan mode label
+    CreateLabel(hwnd_, L"Mode:", MARGIN, configRowY, 40, CONTROL_HEIGHT);
+
+    // Create scan mode ComboBox
+    hScanModeCombo_ = CreateComboBox(hwnd_, IDC_SCAN_MODE, MARGIN + 45, configRowY, 80, CONTROL_HEIGHT + 200);
+    ComboBox_AddString(hScanModeCombo_, L"Quick");
+    ComboBox_AddString(hScanModeCombo_, L"Deep");
+    ComboBox_AddString(hScanModeCombo_, L"Full");
+    ComboBox_SetCurSel(hScanModeCombo_, 1);  // Default to Deep
+
+    // Create file type filter checkboxes
+    hScanImagesCheck_ = CreateWindowExW(
+        0, L"BUTTON", L"Images",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        MARGIN + 45 + 80 + MARGIN + 10, configRowY, 70, CONTROL_HEIGHT,
+        hwnd_, reinterpret_cast<HMENU>(IDC_SCAN_IMAGES), hInst_, nullptr);
+    Button_SetCheck(hScanImagesCheck_, BST_CHECKED);  // Default checked
+
+    hScanVideosCheck_ = CreateWindowExW(
+        0, L"BUTTON", L"Videos",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN, configRowY, 70, CONTROL_HEIGHT,
+        hwnd_, reinterpret_cast<HMENU>(IDC_SCAN_VIDEOS), hInst_, nullptr);
+    Button_SetCheck(hScanVideosCheck_, BST_CHECKED);  // Default checked
+
+    // Create bad sector policy label
+    CreateLabel(hwnd_, L"Bad Sectors:", MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN, configRowY, 70, CONTROL_HEIGHT);
+
+    // Create bad sector policy ComboBox
+    hBadSectorCombo_ = CreateComboBox(hwnd_, IDC_BAD_SECTOR_POLICY,
+                                       MARGIN + 45 + 80 + MARGIN + 10 + 70 + MARGIN + 70 + MARGIN + 75, configRowY,
+                                       80, CONTROL_HEIGHT + 200);
+    ComboBox_AddString(hBadSectorCombo_, L"Skip");
+    ComboBox_AddString(hBadSectorCombo_, L"Retry");
+    ComboBox_AddString(hBadSectorCombo_, L"Force");
+    ComboBox_SetCurSel(hBadSectorCombo_, 0);  // Default to Skip
+
     // Create file list ListView
-    int fileListY = MARGIN + CONTROL_HEIGHT + MARGIN;
+    int fileListY = configRowY + CONTROL_HEIGHT + MARGIN;
     hFileList_ = CreateListView(hwnd_, IDC_FILE_LIST, MARGIN, fileListY, 600, 400);
     SetupListViewColumns();
 
@@ -282,7 +322,8 @@ void MainWindow::OnCreate() {
 void MainWindow::OnSize(int cx, int cy) {
     if (!hFileList_) return;  // Controls not created yet
 
-    int topRowHeight = MARGIN + CONTROL_HEIGHT + MARGIN;
+    // Account for two rows: disk selection row + configuration row
+    int topRowHeight = MARGIN + CONTROL_HEIGHT + MARGIN + CONTROL_HEIGHT + MARGIN;
     int bottomRowY = cy - STATUSBAR_HEIGHT - MARGIN;
 
     // Resize file list to fill available space
@@ -601,6 +642,11 @@ void MainWindow::EnableControls(bool scanning) {
     EnableWindow(hScanBtn_, !scanning);
     EnableWindow(hRecoverBtn_, !scanning && !foundFiles_.empty());
     EnableWindow(hStopBtn_, scanning);
+    // Disable configuration controls during scanning
+    EnableWindow(hScanModeCombo_, !scanning);
+    EnableWindow(hScanImagesCheck_, !scanning);
+    EnableWindow(hScanVideosCheck_, !scanning);
+    EnableWindow(hBadSectorCombo_, !scanning);
 }
 
 void MainWindow::UpdateStatus(const wchar_t* text) {
@@ -713,15 +759,23 @@ void MainWindow::StartScan() {
     ClearFileList();
     UpdateProgress(0);
 
-    // Configure scan
+    // Configure scan from UI controls
     ScanManager::Config config;
     config.device_path = disk->device_path;
     config.db_path = GetTempDbPath();
     config.session_id = GenerateSessionId();
-    config.mode = ScanMode::Deep;
-    config.bad_sector_policy = BadSectorPolicy::Skip;
-    config.scan_images = true;
-    config.scan_videos = true;
+
+    // Get scan mode from ComboBox
+    int modeIdx = ComboBox_GetCurSel(hScanModeCombo_);
+    config.mode = static_cast<ScanMode>(modeIdx);
+
+    // Get bad sector policy from ComboBox
+    int policyIdx = ComboBox_GetCurSel(hBadSectorCombo_);
+    config.bad_sector_policy = static_cast<BadSectorPolicy>(policyIdx);
+
+    // Get file type filters from checkboxes
+    config.scan_images = (Button_GetCheck(hScanImagesCheck_) == BST_CHECKED);
+    config.scan_videos = (Button_GetCheck(hScanVideosCheck_) == BST_CHECKED);
 
     // If a partition is selected, limit scan to that partition
     const PartitionInfo* part = GetSelectedPartition();

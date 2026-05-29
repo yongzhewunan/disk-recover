@@ -64,6 +64,12 @@ private:
     HWND hStatusBar_ = nullptr;         // Status bar
     HWND hProgressBar_ = nullptr;       // Progress bar (embedded in status bar)
 
+    // Configuration controls
+    HWND hScanModeCombo_ = nullptr;         // ComboBox for scan mode
+    HWND hScanImagesCheck_ = nullptr;       // Checkbox for image filter
+    HWND hScanVideosCheck_ = nullptr;       // Checkbox for video filter
+    HWND hBadSectorCombo_ = nullptr;        // ComboBox for bad sector policy
+
     // Business logic managers
     std::unique_ptr<ScanManager> scanManager_;
     std::unique_ptr<RecoverManager> recoverManager_;
