@@ -1,16 +1,22 @@
-﻿#include <CLI/CLI.hpp>
+﻿#define NOMINMAX
+#include <CLI/CLI.hpp>
 #include "disk-io/disk_handle.hpp"
 #include "disk-io/disk_info.hpp"
+#include "disk-io/sector_reader.hpp"
+#include "disk-io/aligned_buffer.hpp"
 #include "business/scan_manager.hpp"
 #include "business/recover_manager.hpp"
 #include "business/multi_target_writer.hpp"
 #include "business/scan_cache_db.hpp"
+#include "business/preview_manager.hpp"
 #include "common/utils.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <filesystem>
 #include <csignal>
+#include <gdiplus.h>
+#include <memory>
 
 using namespace disk_recover;
 
@@ -20,6 +26,40 @@ static bool g_interrupted = false;
 void signal_handler(int) {
     g_interrupted = true;
     g_scan_manager.stop_scan();
+}
+
+// Helper function to save thumbnail to file
+static bool SaveThumbnailToFile(HBITMAP thumbnail, const std::wstring& output_path) {
+    ULONG_PTR gdiplus_token = 0;
+    Gdiplus::GdiplusStartupInput gdiplus_input;
+    Gdiplus::GdiplusStartup(&gdiplus_token, &gdiplus_input, nullptr);
+
+    Gdiplus::Bitmap bitmap(thumbnail, nullptr);
+    CLSID png_clsid = {0};
+    bool found_encoder = false;
+
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size > 0) {
+        auto encoder_buffer = std::make_unique<BYTE[]>(size);
+        auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(encoder_buffer.get());
+        Gdiplus::GetImageEncoders(num, size, codecs);
+        for (UINT i = 0; i < num; ++i) {
+            if (wcscmp(codecs[i].MimeType, L"image/png") == 0) {
+                png_clsid = codecs[i].Clsid;
+                found_encoder = true;
+                break;
+            }
+        }
+    }
+
+    bool success = false;
+    if (found_encoder) {
+        success = (bitmap.Save(output_path.c_str(), &png_clsid) == Gdiplus::Ok);
+    }
+
+    Gdiplus::GdiplusShutdown(gdiplus_token);
+    return success;
 }
 
 int main(int argc, char** argv) {
@@ -214,6 +254,183 @@ int main(int argc, char** argv) {
         } else {
             std::cout << "未找到会话: " << progress_session << "\n";
         }
+        db.close();
+    });
+
+    // preview
+    std::string preview_session, preview_db, preview_file_ref, preview_output;
+    std::string preview_device;
+
+    auto preview_cmd = app.add_subcommand("preview", "预览扫描结果中的文件");
+    preview_cmd->add_option("session", preview_session, "扫描会话ID")->required();
+    preview_cmd->add_option("--db", preview_db, "缓存数据库路径")->default_val("scan_cache.db");
+    preview_cmd->add_option("--file", preview_file_ref, "文件索引或名称")->required();
+    preview_cmd->add_option("--output", preview_output, "缩略图输出路径");
+    preview_cmd->add_option("--device", preview_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)");
+
+    preview_cmd->callback([&]() {
+        ScanCacheDB db;
+        std::wstring db_path = std::wstring(preview_db.begin(), preview_db.end());
+        if (!db.open(db_path)) {
+            std::cerr << "无法打开数据库: " << preview_db << "\n";
+            return;
+        }
+
+        uint32_t file_count = db.query_file_count(preview_session);
+        if (file_count == 0) {
+            std::cout << "会话 " << preview_session << " 中没有文件\n";
+            db.close();
+            return;
+        }
+
+        // Try to parse file_ref as index first
+        RecoverableFile target_file;
+        bool found = false;
+        uint32_t target_index = 0;
+
+        try {
+            target_index = std::stoul(preview_file_ref);
+            if (target_index < file_count) {
+                auto files = db.query_files(preview_session, 1, target_index);
+                if (!files.empty()) {
+                    target_file = files[0];
+                    found = true;
+                }
+            }
+        } catch (...) {
+            // Not a number, search by name
+        }
+
+        // Search by name if not found by index
+        if (!found) {
+            std::wstring search_name = std::wstring(preview_file_ref.begin(), preview_file_ref.end());
+            uint32_t batch_size = 100;
+            for (uint32_t offset = 0; offset < file_count && !found; offset += batch_size) {
+                auto files = db.query_files(preview_session, batch_size, offset);
+                for (const auto& f : files) {
+                    if (f.file_name.find(search_name) != std::wstring::npos) {
+                        target_file = f;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!found) {
+            std::cout << "未找到文件: " << preview_file_ref << "\n";
+            db.close();
+            return;
+        }
+
+        // Display file information
+        std::wcout << L"文件信息:\n";
+        std::wcout << L"  名称: " << target_file.file_name << L"\n";
+        std::wcout << L"  大小: " << utils::FormatFileSize(target_file.file_size) << L"\n";
+        std::wcout << L"  类型: ";
+        switch (target_file.file_type) {
+            case FileType::Image: std::wcout << L"图片"; break;
+            case FileType::Video: std::wcout << L"视频"; break;
+            default: std::wcout << L"未知"; break;
+        }
+        std::wcout << L"\n";
+        std::wcout << L"  状态: " << (target_file.is_corrupted ? L"已损坏" : L"正常") << L"\n";
+        std::wcout << L"  片段数: " << target_file.fragments.size() << L"\n";
+        for (size_t i = 0; i < target_file.fragments.size() && i < 5; ++i) {
+            const auto& frag = target_file.fragments[i];
+            std::wcout << L"    片段" << i << L": 起始扇区=" << frag.start_sector
+                       << L", 扇区数=" << frag.sector_count << L"\n";
+        }
+        if (target_file.fragments.size() > 5) {
+            std::wcout << L"    ... 还有 " << (target_file.fragments.size() - 5) << L" 个片段\n";
+        }
+
+        // Generate thumbnail if output path specified
+        if (!preview_output.empty()) {
+            if (preview_device.empty()) {
+                std::cerr << "\n错误: 生成缩略图需要指定设备路径 (--device)\n";
+                db.close();
+                return;
+            }
+
+            if (target_file.file_type != FileType::Image && target_file.file_type != FileType::Video) {
+                std::cerr << "\n错误: 仅支持图片和视频文件的缩略图生成\n";
+                db.close();
+                return;
+            }
+
+            // Open disk
+            DiskHandle handle;
+            std::wstring device_path = std::wstring(preview_device.begin(), preview_device.end());
+            if (!handle.open(device_path)) {
+                std::cerr << "\n错误: 无法打开设备 " << preview_device << "\n";
+                db.close();
+                return;
+            }
+
+            // Read file data
+            SectorReader reader(handle, 512);
+            AlignedBuffer buffer;
+
+            // Calculate total sectors needed
+            uint64_t total_sectors = 0;
+            for (const auto& frag : target_file.fragments) {
+                total_sectors += frag.sector_count;
+            }
+
+            // Limit read size for preview (max 64MB)
+            const uint64_t max_preview_sectors = (64 * 1024 * 1024) / 512;
+            uint64_t sectors_to_read = std::min(total_sectors, max_preview_sectors);
+
+            // Allocate buffer
+            buffer.allocate(static_cast<size_t>(sectors_to_read * 512), 512);
+
+            // Read fragments
+            size_t buffer_offset = 0;
+            uint64_t sectors_read = 0;
+            for (const auto& frag : target_file.fragments) {
+                if (sectors_read >= sectors_to_read) break;
+
+                uint64_t sectors_from_frag = std::min(frag.sector_count, sectors_to_read - sectors_read);
+                AlignedBuffer frag_buffer;
+                frag_buffer.allocate(static_cast<size_t>(sectors_from_frag * 512), 512);
+
+                if (reader.read_sectors(frag.start_sector, static_cast<uint32_t>(sectors_from_frag), frag_buffer)) {
+                    memcpy(buffer.data() + buffer_offset, frag_buffer.data(), static_cast<size_t>(sectors_from_frag * 512));
+                    buffer_offset += static_cast<size_t>(sectors_from_frag * 512);
+                }
+                sectors_read += sectors_from_frag;
+            }
+
+            std::cout << "\n已读取 " << buffer_offset << " 字节数据\n";
+
+            // Generate thumbnail
+            auto preview_mgr = std::make_unique<business::PreviewManager>();
+            HBITMAP thumbnail = nullptr;
+
+            if (target_file.file_type == FileType::Image) {
+                thumbnail = preview_mgr->CreateThumbnailFromData(
+                    buffer.data(), buffer_offset, 256, 256);
+            } else if (target_file.file_type == FileType::Video) {
+                thumbnail = preview_mgr->CreateVideoThumbnailFromData(
+                    buffer.data(), buffer_offset, 256, 256);
+            }
+
+            if (thumbnail) {
+                std::wstring output_path = std::wstring(preview_output.begin(), preview_output.end());
+                if (SaveThumbnailToFile(thumbnail, output_path)) {
+                    std::wcout << L"缩略图已保存: " << output_path << L"\n";
+                } else {
+                    std::cerr << "保存缩略图失败\n";
+                }
+                DeleteObject(thumbnail);
+            } else {
+                std::cerr << "生成缩略图失败\n";
+            }
+
+            handle.close();
+        }
+
         db.close();
     });
 
