@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 
 #include "resource.h"
 #include "disk-io/disk_info.hpp"
@@ -101,6 +102,9 @@ private:
 
     // Batch update tracking
     uint32_t lastDisplayedFileCount_ = 0;  // Files already shown in ListView
+
+    // Window lifetime tracking for safe PostMessage
+    std::shared_ptr<std::atomic<bool>> windowAlive_;
 
     // Message handlers
     void OnCreate();

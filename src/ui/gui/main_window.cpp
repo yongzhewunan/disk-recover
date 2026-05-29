@@ -189,8 +189,13 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
         case WM_SCAN_PROGRESS:
             if (lParam) {
-                self->OnScanProgress(*reinterpret_cast<const ScanProgress*>(lParam));
-                delete reinterpret_cast<const ScanProgress*>(lParam);
+                // Use unique_ptr for RAII cleanup - ensures deletion even if
+                // OnScanProgress throws or window is being destroyed
+                auto progressPtr = std::unique_ptr<ScanProgress>(
+                    reinterpret_cast<ScanProgress*>(lParam));
+                if (self->hwnd_) {
+                    self->OnScanProgress(*progressPtr);
+                }
             }
             return 0;
 
@@ -208,6 +213,9 @@ void MainWindow::OnCreate() {
     LOG_INIT(L"");
     LOG_MSG(L"[MainWindow] OnCreate started");
 
+    // Mark window as alive for safe PostMessage from scan thread
+    windowAlive_ = std::make_shared<std::atomic<bool>>(true);
+
     // Initialize business logic managers
     scanManager_ = std::make_unique<ScanManager>();
     recoverManager_ = std::make_unique<RecoverManager>();
@@ -216,10 +224,17 @@ void MainWindow::OnCreate() {
     LOG_MSG(L"[MainWindow] Business managers initialized");
 
     // Set up scan callbacks with thread-safe UI updates via PostMessage
-    scanManager_->set_progress_callback([this](const ScanProgress& progress) {
+    auto aliveFlag = windowAlive_;  // Copy shared_ptr for lambda capture
+    scanManager_->set_progress_callback([this, aliveFlag](const ScanProgress& progress) {
+        // If window is already destroyed, don't bother posting
+        if (!aliveFlag->load()) return;
+
         // Post message to UI thread (allocate copy on heap)
         ScanProgress* p = new ScanProgress(progress);
-        PostMessageW(hwnd_, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(p));
+        if (!PostMessageW(hwnd_, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(p))) {
+            // PostMessage failed (window destroyed or queue full) - free memory
+            delete p;
+        }
     });
 
     // Batch file updates via progress callback (no per-file messages)
@@ -424,6 +439,12 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
 }
 
 void MainWindow::OnDestroy() {
+    // Signal that the window is being destroyed so scan callback
+    // won't PostMessage to a dead window or leak memory
+    if (windowAlive_) {
+        windowAlive_->store(false);
+    }
+
     // Stop any ongoing scan
     if (scanManager_ && scanManager_->is_scanning()) {
         scanManager_->stop_scan();
