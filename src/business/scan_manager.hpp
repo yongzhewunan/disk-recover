@@ -7,6 +7,7 @@
 #include <functional>
 #include <vector>
 #include <string>
+#include <thread>
 
 namespace disk_recover {
 
@@ -34,7 +35,16 @@ public:
     };
 
     ScanManager() = default;
-    ~ScanManager() { stop_scan(); }
+    ~ScanManager() {
+        stop_scan();
+        if (scan_thread_.joinable()) {
+            scan_thread_.join();
+        }
+    }
+
+    // Non-copyable: owns a thread
+    ScanManager(const ScanManager&) = delete;
+    ScanManager& operator=(const ScanManager&) = delete;
 
     bool start_scan(const Config& config);
     bool resume_scan(const Config& config);
@@ -74,6 +84,8 @@ private:
 
     std::function<void(const ScanProgress&)> on_progress_;
     std::function<void(const RecoverableFile&)> on_file_found_;
+
+    std::thread scan_thread_;
 };
 
 } // namespace disk_recover

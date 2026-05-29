@@ -76,7 +76,7 @@ bool ScanManager::start_scan(const Config& config) {
     }
     cache_db_.create_session(config.session_id);
 
-    std::thread(&ScanManager::scan_thread_func, this, config).detach();
+    scan_thread_ = std::thread(&ScanManager::scan_thread_func, this, config);
     return true;
 }
 
@@ -107,7 +107,7 @@ bool ScanManager::resume_scan(const Config& config) {
     Config resume_config = config;
     resume_config.start_sector = saved_progress.sectors_scanned;
 
-    std::thread(&ScanManager::scan_thread_func, this, resume_config).detach();
+    scan_thread_ = std::thread(&ScanManager::scan_thread_func, this, resume_config);
     return true;
 }
 
@@ -174,13 +174,17 @@ void ScanManager::scan_thread_func(Config config) {
             std::lock_guard lock(progress_mutex_);
             progress_.files_found++;
         }
+        bool need_flush = false;
         {
             std::lock_guard lock(files_mutex_);
             ui_files_.push_back(file);  // Copy for UI
             pending_files_.push_back(std::move(file));
             if (pending_files_.size() >= FLUSH_THRESHOLD) {
-                flush_cache(current_session_id_);
+                need_flush = true;
             }
+        }
+        if (need_flush) {
+            flush_cache(current_session_id_);
         }
     };
 
@@ -359,10 +363,7 @@ void ScanManager::scan_thread_func(Config config) {
     }
 
     // All cleanup happens HERE in the scan thread, not in stop_scan()
-    {
-        std::lock_guard lock(files_mutex_);
-        flush_cache(current_session_id_);
-    }
+    flush_cache(current_session_id_);
 
     {
         std::lock_guard lock(progress_mutex_);
@@ -382,9 +383,13 @@ void ScanManager::scan_thread_func(Config config) {
 }
 
 void ScanManager::flush_cache(const std::string& session_id) {
-    if (pending_files_.empty()) return;
-    cache_db_.insert_files_bulk(session_id, pending_files_);
-    pending_files_.clear();
+    std::vector<RecoverableFile> to_write;
+    {
+        std::lock_guard lock(files_mutex_);
+        if (pending_files_.empty()) return;
+        to_write.swap(pending_files_);
+    }
+    cache_db_.insert_files_bulk(session_id, to_write);
 }
 
 } // namespace disk_recover
