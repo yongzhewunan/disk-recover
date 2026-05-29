@@ -86,6 +86,40 @@ bool ScanManager::start_scan(const Config& config) {
     return true;
 }
 
+bool ScanManager::resume_scan(const Config& config) {
+    if (scanning_.load()) return false;
+
+    if (!cache_db_.open(config.db_path)) {
+        return false;
+    }
+
+    // Load previous progress
+    ScanProgress saved_progress;
+    if (!cache_db_.load_progress(config.session_id, saved_progress)) {
+        cache_db_.close();
+        return false;
+    }
+
+    // Check if already complete
+    if (saved_progress.is_complete) {
+        cache_db_.close();
+        return false;
+    }
+
+    scanning_ = true;
+    paused_ = false;
+    stop_requested_ = false;
+    progress_ = saved_progress;
+    current_session_id_ = config.session_id;
+
+    // Create a modified config with the resume position
+    Config resume_config = config;
+    resume_config.start_sector = saved_progress.sectors_scanned;
+
+    std::thread(&ScanManager::scan_thread_func, this, resume_config).detach();
+    return true;
+}
+
 void ScanManager::pause_scan() { paused_ = true; }
 void ScanManager::resume_scan() { paused_ = false; }
 

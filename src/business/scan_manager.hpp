@@ -34,6 +34,7 @@ public:
     };
 
     bool start_scan(const Config& config);
+    bool resume_scan(const Config& config);
     void pause_scan();
     void resume_scan();
     void stop_scan();

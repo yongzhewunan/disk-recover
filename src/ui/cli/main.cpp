@@ -55,14 +55,16 @@ int main(int argc, char** argv) {
     // scan
     std::string scan_device, scan_session, scan_db_path, bad_sector_str;
     std::string scan_mode_str = "deep";
+    std::string resume_session;
     bool scan_images = true, scan_videos = true;
 
     auto scan_cmd = app.add_subcommand("scan", "扫描磁盘查找可恢复文件");
-    scan_cmd->add_option("device", scan_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)")->required();
+    scan_cmd->add_option("device", scan_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)");
     scan_cmd->add_option("--session", scan_session, "扫描会话ID")->default_val("default");
     scan_cmd->add_option("--db", scan_db_path, "缓存数据库路径")->default_val("scan_cache.db");
     scan_cmd->add_option("--mode", scan_mode_str, "扫描模式 (quick/deep/full)")->default_val("deep");
     scan_cmd->add_option("--bad-sector", bad_sector_str, "坏道策略 (skip/retry/force)")->default_val("skip");
+    scan_cmd->add_option("--resume", resume_session, "恢复中断的扫描会话ID");
     scan_cmd->add_flag("--no-images", scan_images, "跳过图片文件")->group("");
     scan_cmd->add_flag("--no-videos", scan_videos, "跳过视频文件")->group("");
 
@@ -91,10 +93,30 @@ int main(int argc, char** argv) {
                       << "坏道: " << p.bad_sectors_hit << std::flush;
         });
 
-        std::cout << "开始扫描: " << scan_device << "\n";
-        std::cout << "会话ID: " << scan_session << "\n\n";
+        bool scan_started = false;
 
-        if (!g_scan_manager.start_scan(config)) {
+        if (!resume_session.empty()) {
+            // Resume mode: load previous session and continue
+            if (scan_device.empty()) {
+                std::cerr << "错误: 恢复扫描需要指定设备路径\n";
+                return;
+            }
+            std::cout << "恢复扫描会话: " << resume_session << "\n";
+            std::cout << "设备: " << scan_device << "\n\n";
+            config.session_id = resume_session;
+            scan_started = g_scan_manager.resume_scan(config);
+        } else {
+            // Normal mode: start new scan
+            if (scan_device.empty()) {
+                std::cerr << "错误: 需要指定设备路径\n";
+                return;
+            }
+            std::cout << "开始扫描: " << scan_device << "\n";
+            std::cout << "会话ID: " << scan_session << "\n\n";
+            scan_started = g_scan_manager.start_scan(config);
+        }
+
+        if (!scan_started) {
             std::cerr << "启动扫描失败\n";
             return;
         }
