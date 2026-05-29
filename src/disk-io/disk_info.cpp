@@ -8,26 +8,37 @@ namespace disk_recover {
 std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
     std::vector<DiskInfo> disks;
 
+    OutputDebugStringW(L"[DiskInfo] Starting disk enumeration...\n");
+
     // Try to enumerate up to 32 physical drives
     // Note: Requires Administrator privileges to access physical disks
+    int consecutiveFailures = 0;
     for (uint32_t i = 0; i < 32; ++i) {
         std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(i);
         DiskHandle handle;
 
-        // Try to open this disk - if fails, continue to next (disk might not exist)
+        wchar_t debugBuf[128];
+        _snwprintf_s(debugBuf, _TRUNCATE, L"[DiskInfo] Trying to open %s\n", path.c_str());
+        OutputDebugStringW(debugBuf);
+
+        // Try to open this disk
         if (!handle.open(path)) {
-            // Only stop if we've found at least one disk and this one doesn't exist
-            // Otherwise continue trying (might be permission issue on first disk)
-            if (disks.empty() && i == 0) {
-                // First disk failed - likely permission issue or no disks
-                continue;
-            }
-            // If we found disks before, stop when we can't open more
-            if (!disks.empty()) {
+            wchar_t errBuf[64];
+            _snwprintf_s(errBuf, _TRUNCATE, L"[DiskInfo] Failed to open %s\n", path.c_str());
+            OutputDebugStringW(errBuf);
+
+            consecutiveFailures++;
+            // If we found disks and hit 3 consecutive failures, stop
+            if (!disks.empty() && consecutiveFailures >= 3) {
                 break;
             }
             continue;
         }
+
+        // Successfully opened a disk
+        consecutiveFailures = 0;
+
+        OutputDebugStringW(L"[DiskInfo] Successfully opened disk, querying info...\n");
 
         DiskInfo info{};
         info.physical_drive_number = i;
@@ -41,15 +52,9 @@ std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
         disks.push_back(std::move(info));
     }
 
-    // If no disks found, try again with a warning about permissions
-    if (disks.empty()) {
-        // Try PhysicalDrive0 explicitly to detect permission issue
-        DiskHandle handle;
-        if (!handle.open(L"\\\\.\\PhysicalDrive0")) {
-            // Log: likely need admin privileges
-            OutputDebugStringW(L"[DiskInfo] Cannot open PhysicalDrive0 - may need Administrator privileges\n");
-        }
-    }
+    wchar_t resultBuf[64];
+    _snwprintf_s(resultBuf, _TRUNCATE, L"[DiskInfo] Enumeration complete, found %zu disks\n", disks.size());
+    OutputDebugStringW(resultBuf);
 
     return disks;
 }
