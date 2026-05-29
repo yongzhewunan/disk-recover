@@ -1,4 +1,5 @@
 #include "disk_info.hpp"
+#include "../common/logger.hpp"
 #include <winioctl.h>
 #include <ntddscsi.h>
 #include <cstring>
@@ -8,7 +9,7 @@ namespace disk_recover {
 std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
     std::vector<DiskInfo> disks;
 
-    OutputDebugStringW(L"[DiskInfo] Starting disk enumeration...\n");
+    LOG_MSG(L"[DiskInfo] Starting disk enumeration...");
 
     // Try to enumerate up to 32 physical drives
     // Note: Requires Administrator privileges to access physical disks
@@ -17,15 +18,12 @@ std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
         std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(i);
         DiskHandle handle;
 
-        wchar_t debugBuf[128];
-        _snwprintf_s(debugBuf, _TRUNCATE, L"[DiskInfo] Trying to open %s\n", path.c_str());
-        OutputDebugStringW(debugBuf);
+        LOG_FMT(L"[DiskInfo] Trying to open %s", path.c_str());
 
         // Try to open this disk
         if (!handle.open(path)) {
-            wchar_t errBuf[64];
-            _snwprintf_s(errBuf, _TRUNCATE, L"[DiskInfo] Failed to open %s\n", path.c_str());
-            OutputDebugStringW(errBuf);
+            DWORD err = GetLastError();
+            LOG_FMT(L"[DiskInfo] Failed to open %s, error=%d", path.c_str(), err);
 
             consecutiveFailures++;
             // If we found disks and hit 3 consecutive failures, stop
@@ -38,23 +36,30 @@ std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
         // Successfully opened a disk
         consecutiveFailures = 0;
 
-        OutputDebugStringW(L"[DiskInfo] Successfully opened disk, querying info...\n");
+        LOG_MSG(L"[DiskInfo] Successfully opened disk, querying info...");
 
         DiskInfo info{};
         info.physical_drive_number = i;
         info.device_path = path;
 
-        QueryDiskGeometry(handle, info.geometry);
-        QueryPartitionTable(handle, info.partitions);
+        if (!QueryDiskGeometry(handle, info.geometry)) {
+            LOG_MSG(L"[DiskInfo] Failed to query disk geometry");
+        }
+
+        if (!QueryPartitionTable(handle, info.partitions)) {
+            LOG_MSG(L"[DiskInfo] Failed to query partition table");
+        }
+
         info.disk_size_bytes = info.geometry.total_sectors * info.geometry.sector_size;
         info.model_name = QueryDiskModel(handle);
+
+        LOG_FMT(L"[DiskInfo] Found disk: %s, size=%llu bytes, model=%s",
+                path.c_str(), info.disk_size_bytes, info.model_name.c_str());
 
         disks.push_back(std::move(info));
     }
 
-    wchar_t resultBuf[64];
-    _snwprintf_s(resultBuf, _TRUNCATE, L"[DiskInfo] Enumeration complete, found %zu disks\n", disks.size());
-    OutputDebugStringW(resultBuf);
+    LOG_FMT(L"[DiskInfo] Enumeration complete, found %zu disks", disks.size());
 
     return disks;
 }

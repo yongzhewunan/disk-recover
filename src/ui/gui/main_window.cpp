@@ -12,6 +12,7 @@
 #include "disk-io/sector_reader.hpp"
 #include "disk-io/aligned_buffer.hpp"
 #include "business/multi_target_writer.hpp"
+#include "common/logger.hpp"
 
 // For admin check
 #include <sddl.h>
@@ -207,10 +208,16 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 void MainWindow::OnCreate() {
+    // Initialize logger
+    LOG_INIT(L"");
+    LOG_MSG(L"[MainWindow] OnCreate started");
+
     // Initialize business logic managers
     scanManager_ = std::make_unique<ScanManager>();
     recoverManager_ = std::make_unique<RecoverManager>();
     previewManager_ = std::make_unique<business::PreviewManager>();
+
+    LOG_MSG(L"[MainWindow] Business managers initialized");
 
     // Set up scan callbacks with thread-safe UI updates via PostMessage
     scanManager_->set_progress_callback([this](const ScanProgress& progress) {
@@ -224,6 +231,8 @@ void MainWindow::OnCreate() {
         RecoverableFile* f = new RecoverableFile(file);
         PostMessageW(hwnd_, WM_FILE_FOUND, 0, reinterpret_cast<LPARAM>(f));
     });
+
+    LOG_MSG(L"[MainWindow] Scan callbacks set up");
 
     // Create disk selection label
     hDiskLabel_ = CreateLabel(hwnd_, L"Physical Disk:", MARGIN, MARGIN, 80, CONTROL_HEIGHT);
@@ -325,10 +334,15 @@ void MainWindow::OnCreate() {
     // Create status bar
     hStatusBar_ = CreateStatusBar(hwnd_, IDC_STATUSBAR);
 
+    LOG_MSG(L"[MainWindow] UI controls created, calling RefreshDiskList");
+
     // Populate disk list with real disk information
     RefreshDiskList();
 
-    UpdateStatus(L"Ready. Select a disk and partition, then click Scan.");
+    LOG_FMT(L"[MainWindow] RefreshDiskList completed, %zu disks found", cachedDisks_.size());
+
+    std::wstring statusMsg = L"Ready. Log file: " + Logger::instance().getLogPath();
+    UpdateStatus(statusMsg.c_str());
 }
 
 void MainWindow::OnSize(int cx, int cy) {
@@ -687,18 +701,19 @@ void MainWindow::UpdateProgress(int percent) {
 }
 
 void MainWindow::RefreshDiskList() {
+    LOG_MSG(L"[MainWindow] RefreshDiskList: starting enumeration");
+
     // Enumerate physical disks
-    OutputDebugStringW(L"[MainWindow] RefreshDiskList: enumerating physical disks...\n");
     cachedDisks_ = DiskInfoQuery::EnumeratePhysicalDisks();
 
-    wchar_t debugMsg[128];
-    _snwprintf_s(debugMsg, _TRUNCATE, L"[MainWindow] Found %zu disks\n", cachedDisks_.size());
-    OutputDebugStringW(debugMsg);
+    LOG_FMT(L"[MainWindow] RefreshDiskList: found %zu disks", cachedDisks_.size());
 
     // Clear and populate disk ComboBox
     ComboBox_ResetContent(hDiskList_);
 
     if (cachedDisks_.empty()) {
+        LOG_MSG(L"[MainWindow] No disks found, checking admin status");
+
         ComboBox_AddString(hDiskList_, L"No disks - Run as Admin");
         ComboBox_SetCurSel(hDiskList_, 0);
         EnableWindow(hScanBtn_, FALSE);
@@ -713,21 +728,29 @@ void MainWindow::RefreshDiskList() {
             FreeSid(adminGroup);
         }
 
+        LOG_FMT(L"[MainWindow] Admin check result: isAdmin=%d", isAdmin);
+
+        // Show log file location in message
+        std::wstring logPath = Logger::instance().getLogPath();
+        std::wstring logInfo = L"\n\nLog file location: " + logPath;
+
         if (!isAdmin) {
+            LOG_MSG(L"[MainWindow] Not running as admin, showing error");
             UpdateStatus(L"ERROR: Run as Administrator to access physical disks.");
             MessageBoxW(hwnd_,
-                L"This application requires Administrator privileges to access physical disks.\n\n"
-                L"Please right-click disk-recover.exe and select \"Run as administrator\".",
+                (L"This application requires Administrator privileges to access physical disks.\n\n"
+                 L"Please right-click disk-recover.exe and select \"Run as administrator\"." + logInfo).c_str(),
                 L"Administrator Required",
                 MB_OK | MB_ICONWARNING);
         } else {
+            LOG_MSG(L"[MainWindow] Running as admin but no disks found");
             UpdateStatus(L"No physical disks found on this system.");
             MessageBoxW(hwnd_,
-                L"No physical disks were found on this system.\n\n"
-                L"This could happen if:\n"
-                L"- No disks are connected\n"
-                L"- All disks are in use by other applications\n"
-                L"- Disk drivers are not properly installed",
+                (L"No physical disks were found on this system.\n\n"
+                 L"This could happen if:\n"
+                 L"- No disks are connected\n"
+                 L"- All disks are in use by other applications\n"
+                 L"- Disk drivers are not properly installed" + logInfo).c_str(),
                 L"No Disks Found",
                 MB_OK | MB_ICONINFORMATION);
         }
