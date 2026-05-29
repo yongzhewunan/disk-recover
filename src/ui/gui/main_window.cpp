@@ -3,6 +3,7 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <string>
+#include <shlobj.h>  // For folder browse dialog
 
 namespace disk_recover::gui {
 
@@ -26,6 +27,22 @@ static std::wstring FormatSize(uint64_t bytes) {
         _snwprintf_s(buf, _TRUNCATE, L"%llu B", bytes);
     }
     return buf;
+}
+
+// Helper: Get file type string
+static const wchar_t* FileTypeToString(FileType type) {
+    switch (type) {
+        case FileType::Image: return L"Image";
+        case FileType::Video: return L"Video";
+        default: return L"Unknown";
+    }
+}
+
+MainWindow::~MainWindow() {
+    // Stop any ongoing scan before destruction
+    if (scanManager_ && scanManager_->is_scanning()) {
+        scanManager_->stop_scan();
+    }
 }
 
 bool MainWindow::RegisterClass(HINSTANCE hInst) {
@@ -132,12 +149,48 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             PostQuitMessage(0);
             return 0;
 
+        case WM_SCAN_PROGRESS:
+            if (lParam) {
+                self->OnScanProgress(*reinterpret_cast<const ScanProgress*>(lParam));
+                delete reinterpret_cast<const ScanProgress*>(lParam);
+            }
+            return 0;
+
+        case WM_FILE_FOUND:
+            if (lParam) {
+                self->OnFileFound(*reinterpret_cast<const RecoverableFile*>(lParam));
+                delete reinterpret_cast<const RecoverableFile*>(lParam);
+            }
+            return 0;
+
+        case WM_SCAN_COMPLETE:
+            self->OnScanComplete();
+            return 0;
+
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 }
 
 void MainWindow::OnCreate() {
+    // Initialize business logic managers
+    scanManager_ = std::make_unique<ScanManager>();
+    recoverManager_ = std::make_unique<RecoverManager>();
+    previewManager_ = std::make_unique<business::PreviewManager>();
+
+    // Set up scan callbacks with thread-safe UI updates via PostMessage
+    scanManager_->set_progress_callback([this](const ScanProgress& progress) {
+        // Post message to UI thread (allocate copy on heap)
+        ScanProgress* p = new ScanProgress(progress);
+        PostMessageW(hwnd_, WM_SCAN_PROGRESS, 0, reinterpret_cast<LPARAM>(p));
+    });
+
+    scanManager_->set_file_found_callback([this](const RecoverableFile& file) {
+        // Post message to UI thread (allocate copy on heap)
+        RecoverableFile* f = new RecoverableFile(file);
+        PostMessageW(hwnd_, WM_FILE_FOUND, 0, reinterpret_cast<LPARAM>(f));
+    });
+
     // Create disk selection label
     hDiskLabel_ = CreateLabel(hwnd_, L"Physical Disk:", MARGIN, MARGIN, 80, CONTROL_HEIGHT);
 
@@ -186,20 +239,8 @@ void MainWindow::OnCreate() {
     // Create status bar
     hStatusBar_ = CreateStatusBar(hwnd_, IDC_STATUSBAR);
 
-    // Add some demo data to disk list
-    ComboBox_AddString(hDiskList_, L"\\\\.\\PhysicalDrive0 - 256 GB SSD");
-    ComboBox_AddString(hDiskList_, L"\\\\.\\PhysicalDrive1 - 1 TB HDD");
-    ComboBox_SetCurSel(hDiskList_, 0);
-
-    // Add demo data to partition list
-    ComboBox_AddString(hPartitionList_, L"Partition 0 - NTFS (System)");
-    ComboBox_AddString(hPartitionList_, L"Partition 1 - NTFS (Data)");
-    ComboBox_SetCurSel(hPartitionList_, 0);
-
-    // Add demo items to file list
-    AddListViewItem(L"IMG_001.jpg", L"2.5 MB", L"Image", L"Good");
-    AddListViewItem(L"VID_001.mp4", L"150 MB", L"Video", L"Good");
-    AddListViewItem(L"photo.png", L"1.2 MB", L"Image", L"Corrupted");
+    // Populate disk list with real disk information
+    RefreshDiskList();
 
     UpdateStatus(L"Ready. Select a disk and partition, then click Scan.");
 }
@@ -240,20 +281,15 @@ void MainWindow::OnSize(int cx, int cy) {
 void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
     switch (id) {
         case IDC_SCAN_BTN:
-            UpdateStatus(L"Scanning disk...");
-            EnableControls(true);
-            // TODO: Start scan operation
+            StartScan();
             break;
 
         case IDC_RECOVER_BTN:
-            UpdateStatus(L"Recovering files...");
-            // TODO: Start recover operation
+            StartRecovery();
             break;
 
         case IDM_STOP:
-            UpdateStatus(L"Scan stopped.");
-            EnableControls(false);
-            // TODO: Stop current operation
+            StopScan();
             break;
 
         case IDM_EXIT:
@@ -263,7 +299,10 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
         case IDC_DISK_LIST:
             if (notifyCode == CBN_SELCHANGE) {
                 // Disk selection changed - update partition list
-                // TODO: Query partitions for selected disk
+                const DiskInfo* disk = GetSelectedDisk();
+                if (disk) {
+                    RefreshPartitionList(*disk);
+                }
             }
             break;
 
@@ -276,7 +315,10 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
 }
 
 void MainWindow::OnDestroy() {
-    // No cleanup needed - Windows destroys child controls automatically
+    // Stop any ongoing scan
+    if (scanManager_ && scanManager_->is_scanning()) {
+        scanManager_->stop_scan();
+    }
     hwnd_ = nullptr;
 }
 
@@ -286,10 +328,43 @@ void MainWindow::OnNotify(LPNMHDR nmhdr) {
         auto* pnmlv = reinterpret_cast<LPNMLISTVIEW>(nmhdr);
         if ((pnmlv->uNewState & LVIS_SELECTED) && !(pnmlv->uOldState & LVIS_SELECTED)) {
             // New item selected - update preview
-            // TODO: Load preview for selected file
-            SetWindowTextW(hPreview_, L"Loading preview...");
+            UpdatePreview(pnmlv->iItem);
         }
     }
+}
+
+void MainWindow::OnScanProgress(const ScanProgress& progress) {
+    // Update progress bar
+    if (progress.total_sectors > 0) {
+        int percent = static_cast<int>((progress.sectors_scanned * 100) / progress.total_sectors);
+        UpdateProgress(percent);
+    }
+
+    // Update status text
+    wchar_t status[256];
+    _snwprintf_s(status, _TRUNCATE, L"Scanning... %llu/%llu sectors, %u files found",
+                 progress.sectors_scanned, progress.total_sectors, progress.files_found);
+    UpdateStatus(status);
+}
+
+void MainWindow::OnFileFound(const RecoverableFile& file) {
+    // Add file to list
+    foundFiles_.push_back(file);
+    AddListViewItem(file);
+
+    // Enable recover button if we have files
+    if (foundFiles_.size() == 1) {
+        EnableWindow(hRecoverBtn_, TRUE);
+    }
+}
+
+void MainWindow::OnScanComplete() {
+    EnableControls(false);
+    UpdateProgress(100);
+
+    wchar_t status[256];
+    _snwprintf_s(status, _TRUNCATE, L"Scan complete. %zu files found.", foundFiles_.size());
+    UpdateStatus(status);
 }
 
 HWND MainWindow::CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
@@ -426,24 +501,39 @@ void MainWindow::SetupListViewColumns() {
     ListView_InsertColumn(hFileList_, COL_PATH, &col);
 }
 
-void MainWindow::AddListViewItem(const wchar_t* name, const wchar_t* size,
-                                  const wchar_t* type, const wchar_t* status) {
+void MainWindow::AddListViewItem(const RecoverableFile& file) {
     LVITEMW item = {};
-    item.mask = LVIF_TEXT;
+    item.mask = LVIF_TEXT | LVIF_PARAM;
     item.iItem = ListView_GetItemCount(hFileList_);
-    item.pszText = const_cast<wchar_t*>(name);
+    item.pszText = const_cast<wchar_t*>(file.file_name.c_str());
+    item.lParam = static_cast<LPARAM>(foundFiles_.size() - 1);  // Index in foundFiles_
     int idx = ListView_InsertItem(hFileList_, &item);
 
-    ListView_SetItemText(hFileList_, idx, COL_SIZE, const_cast<wchar_t*>(size));
-    ListView_SetItemText(hFileList_, idx, COL_TYPE, const_cast<wchar_t*>(type));
-    ListView_SetItemText(hFileList_, idx, COL_STATUS, const_cast<wchar_t*>(status));
+    // Set size
+    std::wstring sizeStr = FormatSize(file.file_size);
+    ListView_SetItemText(hFileList_, idx, COL_SIZE, const_cast<wchar_t*>(sizeStr.c_str()));
+
+    // Set type
+    ListView_SetItemText(hFileList_, idx, COL_TYPE, const_cast<wchar_t*>(FileTypeToString(file.file_type)));
+
+    // Set status
+    ListView_SetItemText(hFileList_, idx, COL_STATUS,
+                         const_cast<wchar_t*>(file.is_corrupted ? L"Corrupted" : L"Good"));
+
+    // Set path (empty for now, could be derived from fragments)
+    ListView_SetItemText(hFileList_, idx, COL_PATH, const_cast<wchar_t*>(L""));
+}
+
+void MainWindow::ClearFileList() {
+    ListView_DeleteAllItems(hFileList_);
+    foundFiles_.clear();
 }
 
 void MainWindow::EnableControls(bool scanning) {
     EnableWindow(hDiskList_, !scanning);
     EnableWindow(hPartitionList_, !scanning);
     EnableWindow(hScanBtn_, !scanning);
-    EnableWindow(hRecoverBtn_, !scanning && ListView_GetSelectedCount(hFileList_) > 0);
+    EnableWindow(hRecoverBtn_, !scanning && !foundFiles_.empty());
     EnableWindow(hStopBtn_, scanning);
 }
 
@@ -453,6 +543,214 @@ void MainWindow::UpdateStatus(const wchar_t* text) {
 
 void MainWindow::UpdateProgress(int percent) {
     SendMessageW(hProgressBar_, PBM_SETPOS, percent, 0);
+}
+
+void MainWindow::RefreshDiskList() {
+    // Enumerate physical disks
+    cachedDisks_ = DiskInfoQuery::EnumeratePhysicalDisks();
+
+    // Clear and populate disk ComboBox
+    ComboBox_ResetContent(hDiskList_);
+
+    if (cachedDisks_.empty()) {
+        ComboBox_AddString(hDiskList_, L"No disks found");
+        ComboBox_SetCurSel(hDiskList_, 0);
+        EnableWindow(hScanBtn_, FALSE);
+        UpdateStatus(L"No physical disks found. Run as Administrator.");
+        return;
+    }
+
+    for (const auto& disk : cachedDisks_) {
+        // Format: "PhysicalDrive0 - 256 GB (Samsung SSD 860)"
+        std::wstring text = disk.device_path + L" - " + FormatSize(disk.disk_size_bytes);
+        if (!disk.model_name.empty()) {
+            text += L" (" + disk.model_name + L")";
+        }
+        int idx = ComboBox_AddString(hDiskList_, text.c_str());
+        ComboBox_SetItemData(hDiskList_, idx, disk.physical_drive_number);
+    }
+
+    // Select first disk and update partition list
+    ComboBox_SetCurSel(hDiskList_, 0);
+    RefreshPartitionList(cachedDisks_[0]);
+    EnableWindow(hScanBtn_, TRUE);
+}
+
+void MainWindow::RefreshPartitionList(const DiskInfo& disk) {
+    ComboBox_ResetContent(hPartitionList_);
+
+    if (disk.partitions.empty()) {
+        ComboBox_AddString(hPartitionList_, L"No partitions");
+        ComboBox_SetCurSel(hPartitionList_, 0);
+        return;
+    }
+
+    for (const auto& part : disk.partitions) {
+        std::wstring text = L"Partition " + std::to_wstring(part.index) +
+            L" - " + part.filesystem_type;
+        if (!part.volume_label.empty()) {
+            text += L" (" + part.volume_label + L")";
+        }
+        ComboBox_AddString(hPartitionList_, text.c_str());
+    }
+
+    ComboBox_SetCurSel(hPartitionList_, 0);
+}
+
+const DiskInfo* MainWindow::GetSelectedDisk() const {
+    int sel = ComboBox_GetCurSel(hDiskList_);
+    if (sel == CB_ERR || sel < 0 || static_cast<size_t>(sel) >= cachedDisks_.size()) {
+        return nullptr;
+    }
+    return &cachedDisks_[sel];
+}
+
+const PartitionInfo* MainWindow::GetSelectedPartition() const {
+    const DiskInfo* disk = GetSelectedDisk();
+    if (!disk) return nullptr;
+
+    int sel = ComboBox_GetCurSel(hPartitionList_);
+    if (sel == CB_ERR || sel < 0 || static_cast<size_t>(sel) >= disk->partitions.size()) {
+        return nullptr;
+    }
+    return &disk->partitions[sel];
+}
+
+void MainWindow::StartScan() {
+    const DiskInfo* disk = GetSelectedDisk();
+    if (!disk) {
+        MessageBoxW(hwnd_, L"Please select a disk first.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Clear previous results
+    ClearFileList();
+    UpdateProgress(0);
+
+    // Configure scan
+    ScanManager::Config config;
+    config.device_path = disk->device_path;
+    config.db_path = L"scan_cache.db";  // TODO: Use proper temp path
+    config.session_id = "session_1";  // TODO: Generate unique session ID
+    config.mode = ScanMode::Deep;
+    config.bad_sector_policy = BadSectorPolicy::Skip;
+    config.scan_images = true;
+    config.scan_videos = true;
+
+    // If a partition is selected, limit scan to that partition
+    const PartitionInfo* part = GetSelectedPartition();
+    if (part) {
+        config.start_sector = part->start_sector;
+        config.end_sector = part->start_sector + part->sector_count;
+    } else {
+        // Scan entire disk
+        config.start_sector = 0;
+        config.end_sector = disk->geometry.total_sectors;
+    }
+
+    // Start scan
+    if (!scanManager_->start_scan(config)) {
+        MessageBoxW(hwnd_, L"Failed to start scan.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    EnableControls(true);
+    UpdateStatus(L"Starting scan...");
+}
+
+void MainWindow::StopScan() {
+    if (scanManager_ && scanManager_->is_scanning()) {
+        scanManager_->stop_scan();
+        UpdateStatus(L"Scan stopped.");
+        EnableControls(false);
+    }
+}
+
+void MainWindow::StartRecovery() {
+    if (foundFiles_.empty()) {
+        MessageBoxW(hwnd_, L"No files to recover.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Get selected files from ListView
+    // For simplicity, recover all files (could add multi-select support)
+    std::vector<RecoverableFile> selectedFiles;
+
+    int idx = -1;
+    while ((idx = ListView_GetNextItem(hFileList_, idx, LVNI_SELECTED)) != -1) {
+        LVITEMW item = {};
+        item.mask = LVIF_PARAM;
+        item.iItem = idx;
+        ListView_GetItem(hFileList_, &item);
+
+        size_t fileIdx = static_cast<size_t>(item.lParam);
+        if (fileIdx < foundFiles_.size()) {
+            selectedFiles.push_back(foundFiles_[fileIdx]);
+        }
+    }
+
+    if (selectedFiles.empty()) {
+        // If nothing selected, recover all
+        selectedFiles = foundFiles_;
+    }
+
+    // Browse for output folder
+    wchar_t path[MAX_PATH] = {};
+    BROWSEINFOW bi = {};
+    bi.hwndOwner = hwnd_;
+    bi.pszDisplayName = path;
+    bi.lpszTitle = L"Select output folder for recovered files";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) {
+        return;  // User cancelled
+    }
+
+    wchar_t outputPath[MAX_PATH] = {};
+    SHGetPathFromIDListW(pidl, outputPath);
+    CoTaskMemFree(pidl);
+
+    // TODO: Implement actual recovery with RecoverManager
+    // This requires a SectorReader and MultiTargetWriter
+    // For now, show a placeholder message
+    wchar_t msg[512];
+    _snwprintf_s(msg, _TRUNCATE,
+                 L"Recovery to: %s\n\n%zu files selected.\n\n"
+                 L"Note: Full recovery implementation requires SectorReader integration.",
+                 outputPath, selectedFiles.size());
+    MessageBoxW(hwnd_, msg, L"Recovery", MB_OK | MB_ICONINFORMATION);
+
+    UpdateStatus(L"Recovery not yet fully implemented.");
+}
+
+void MainWindow::UpdatePreview(int selectedIndex) {
+    if (selectedIndex < 0 || static_cast<size_t>(selectedIndex) >= foundFiles_.size()) {
+        SetWindowTextW(hPreview_, L"No preview");
+        return;
+    }
+
+    const RecoverableFile& file = foundFiles_[selectedIndex];
+
+    // Check if file is previewable
+    std::wstring ext;
+    size_t dotPos = file.file_name.rfind(L'.');
+    if (dotPos != std::wstring::npos) {
+        ext = file.file_name.substr(dotPos);
+    }
+
+    if (business::PreviewManager::IsImageFile(ext)) {
+        SetWindowTextW(hPreview_, L"Image preview\n(requires file data)");
+        // TODO: To show actual preview, need to:
+        // 1. Read file data from disk using SectorReader
+        // 2. Call previewManager_->CreateThumbnailFromData()
+        // 3. Display HBITMAP in static control (needs SS_BITMAP style)
+    } else if (business::PreviewManager::IsVideoFile(ext)) {
+        SetWindowTextW(hPreview_, L"Video preview\n(requires file data)");
+        // TODO: Same as above, but use CreateVideoThumbnailFromData()
+    } else {
+        SetWindowTextW(hPreview_, L"No preview available\nfor this file type");
+    }
 }
 
 } // namespace disk_recover::gui

@@ -3,15 +3,22 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <string>
+#include <vector>
+#include <memory>
 
 #include "resource.h"
+#include "disk-io/disk_info.hpp"
+#include "business/scan_manager.hpp"
+#include "business/recover_manager.hpp"
+#include "business/preview_manager.hpp"
+#include "common/types.hpp"
 
 namespace disk_recover::gui {
 
 class MainWindow {
 public:
     MainWindow() = default;
-    ~MainWindow() = default;
+    ~MainWindow();
 
     // Non-copyable, non-movable
     MainWindow(const MainWindow&) = delete;
@@ -57,6 +64,15 @@ private:
     HWND hStatusBar_ = nullptr;         // Status bar
     HWND hProgressBar_ = nullptr;       // Progress bar (embedded in status bar)
 
+    // Business logic managers
+    std::unique_ptr<ScanManager> scanManager_;
+    std::unique_ptr<RecoverManager> recoverManager_;
+    std::unique_ptr<business::PreviewManager> previewManager_;
+
+    // Disk information cache
+    std::vector<DiskInfo> cachedDisks_;
+    std::vector<RecoverableFile> foundFiles_;  // Files found during scan
+
     // Layout constants
     static constexpr int MARGIN = 8;
     static constexpr int CONTROL_HEIGHT = 24;
@@ -65,12 +81,20 @@ private:
     static constexpr int PREVIEW_WIDTH = 200;
     static constexpr int STATUSBAR_HEIGHT = 24;
 
+    // Custom message for thread-safe UI updates
+    static constexpr UINT WM_SCAN_PROGRESS = WM_USER + 1;
+    static constexpr UINT WM_FILE_FOUND = WM_USER + 2;
+    static constexpr UINT WM_SCAN_COMPLETE = WM_USER + 3;
+
     // Message handlers
     void OnCreate();
     void OnSize(int cx, int cy);
     void OnCommand(int id, int notifyCode, HWND hCtrl);
     void OnDestroy();
     void OnNotify(LPNMHDR nmhdr);
+    void OnScanProgress(const ScanProgress& progress);
+    void OnFileFound(const RecoverableFile& file);
+    void OnScanComplete();
 
     // Control creation helpers
     HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h);
@@ -82,13 +106,25 @@ private:
 
     // ListView setup
     void SetupListViewColumns();
-    void AddListViewItem(const wchar_t* name, const wchar_t* size,
-                         const wchar_t* type, const wchar_t* status);
+    void AddListViewItem(const RecoverableFile& file);
+    void ClearFileList();
 
     // UI state helpers
     void EnableControls(bool scanning);
     void UpdateStatus(const wchar_t* text);
     void UpdateProgress(int percent);
+
+    // Disk and partition management
+    void RefreshDiskList();
+    void RefreshPartitionList(const DiskInfo& disk);
+    const DiskInfo* GetSelectedDisk() const;
+    const PartitionInfo* GetSelectedPartition() const;
+
+    // Operations
+    void StartScan();
+    void StopScan();
+    void StartRecovery();
+    void UpdatePreview(int selectedIndex);
 
     // Window class name
     static constexpr const wchar_t* CLASS_NAME = L"DiskRecoverMainWindow";
