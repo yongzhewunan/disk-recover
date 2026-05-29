@@ -4,6 +4,14 @@
 #include <commctrl.h>
 #include <string>
 #include <shlobj.h>  // For folder browse dialog
+#include <chrono>
+#include <random>
+#include <sstream>
+
+#include "disk-io/disk_handle.hpp"
+#include "disk-io/sector_reader.hpp"
+#include "disk-io/aligned_buffer.hpp"
+#include "business/multi_target_writer.hpp"
 
 namespace disk_recover::gui {
 
@@ -36,6 +44,29 @@ static const wchar_t* FileTypeToString(FileType type) {
         case FileType::Video: return L"Video";
         default: return L"Unknown";
     }
+}
+
+// Helper: Generate unique session ID
+static std::string GenerateSessionId() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(1000, 9999);
+
+    std::ostringstream oss;
+    oss << "session_" << ms << "_" << dis(gen);
+    return oss.str();
+}
+
+// Helper: Get temp path for database
+static std::wstring GetTempDbPath() {
+    wchar_t tempPath[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempPath);
+    std::wstring dbPath = tempPath;
+    dbPath += L"disk_recover_scan.db";
+    return dbPath;
 }
 
 MainWindow::~MainWindow() {
@@ -630,8 +661,8 @@ void MainWindow::StartScan() {
     // Configure scan
     ScanManager::Config config;
     config.device_path = disk->device_path;
-    config.db_path = L"scan_cache.db";  // TODO: Use proper temp path
-    config.session_id = "session_1";  // TODO: Generate unique session ID
+    config.db_path = GetTempDbPath();
+    config.session_id = GenerateSessionId();
     config.mode = ScanMode::Deep;
     config.bad_sector_policy = BadSectorPolicy::Skip;
     config.scan_images = true;
@@ -711,17 +742,70 @@ void MainWindow::StartRecovery() {
     SHGetPathFromIDListW(pidl, outputPath);
     CoTaskMemFree(pidl);
 
-    // TODO: Implement actual recovery with RecoverManager
-    // This requires a SectorReader and MultiTargetWriter
-    // For now, show a placeholder message
-    wchar_t msg[512];
-    _snwprintf_s(msg, _TRUNCATE,
-                 L"Recovery to: %s\n\n%zu files selected.\n\n"
-                 L"Note: Full recovery implementation requires SectorReader integration.",
-                 outputPath, selectedFiles.size());
-    MessageBoxW(hwnd_, msg, L"Recovery", MB_OK | MB_ICONINFORMATION);
+    // Get the selected disk for SectorReader
+    const DiskInfo* disk = GetSelectedDisk();
+    if (!disk) {
+        MessageBoxW(hwnd_, L"No disk selected.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
 
-    UpdateStatus(L"Recovery not yet fully implemented.");
+    // Open the disk for reading
+    DiskHandle diskHandle;
+    if (!diskHandle.open(disk->device_path)) {
+        MessageBoxW(hwnd_, L"Failed to open disk for reading.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Create SectorReader
+    SectorReader sectorReader(diskHandle, disk->geometry.sector_size);
+
+    // Create MultiTargetWriter with output path
+    MultiTargetWriter writer;
+    writer.add_target(outputPath);
+    writer.set_auto_switch(true);
+
+    // Set progress callback
+    recoverManager_->set_progress_callback([this](uint32_t current, uint32_t total) {
+        if (total > 0) {
+            int percent = static_cast<int>((current * 100) / total);
+            PostMessageW(hwnd_, WM_SCAN_PROGRESS, percent, 0);
+        }
+    });
+
+    // Perform recovery
+    UpdateStatus(L"Starting recovery...");
+    EnableWindow(hRecoverBtn_, FALSE);
+    EnableWindow(hScanBtn_, FALSE);
+
+    bool success = recoverManager_->start_recovery(sectorReader, selectedFiles, writer);
+    const auto& report = recoverManager_->report();
+
+    // Show result
+    wchar_t msg[512];
+    if (success) {
+        _snwprintf_s(msg, _TRUNCATE,
+                     L"Recovery complete!\n\n"
+                     L"Total files: %u\n"
+                     L"Recovered: %u\n"
+                     L"Failed: %u\n"
+                     L"Bytes recovered: %s",
+                     report.total_files, report.success_count, report.failed_count,
+                     FormatSize(report.total_bytes_recovered).c_str());
+        MessageBoxW(hwnd_, msg, L"Recovery Complete", MB_OK | MB_ICONINFORMATION);
+        UpdateStatus(L"Recovery complete.");
+    } else {
+        _snwprintf_s(msg, _TRUNCATE,
+                     L"Recovery partially completed.\n\n"
+                     L"Total files: %u\n"
+                     L"Recovered: %u\n"
+                     L"Failed: %u",
+                     report.total_files, report.success_count, report.failed_count);
+        MessageBoxW(hwnd_, msg, L"Recovery", MB_OK | MB_ICONWARNING);
+        UpdateStatus(L"Recovery completed with errors.");
+    }
+
+    EnableWindow(hRecoverBtn_, TRUE);
+    EnableWindow(hScanBtn_, TRUE);
 }
 
 void MainWindow::UpdatePreview(int selectedIndex) {
@@ -739,18 +823,92 @@ void MainWindow::UpdatePreview(int selectedIndex) {
         ext = file.file_name.substr(dotPos);
     }
 
-    if (business::PreviewManager::IsImageFile(ext)) {
-        SetWindowTextW(hPreview_, L"Image preview\n(requires file data)");
-        // TODO: To show actual preview, need to:
-        // 1. Read file data from disk using SectorReader
-        // 2. Call previewManager_->CreateThumbnailFromData()
-        // 3. Display HBITMAP in static control (needs SS_BITMAP style)
-    } else if (business::PreviewManager::IsVideoFile(ext)) {
-        SetWindowTextW(hPreview_, L"Video preview\n(requires file data)");
-        // TODO: Same as above, but use CreateVideoThumbnailFromData()
-    } else {
+    if (!business::PreviewManager::IsImageFile(ext) &&
+        !business::PreviewManager::IsVideoFile(ext)) {
         SetWindowTextW(hPreview_, L"No preview available\nfor this file type");
+        return;
     }
+
+    // Need to read file data from disk
+    const DiskInfo* disk = GetSelectedDisk();
+    if (!disk) {
+        SetWindowTextW(hPreview_, L"No disk selected");
+        return;
+    }
+
+    // Check if file has fragments
+    if (file.fragments.empty()) {
+        SetWindowTextW(hPreview_, L"No data available");
+        return;
+    }
+
+    // Open disk for reading
+    DiskHandle diskHandle;
+    if (!diskHandle.open(disk->device_path)) {
+        SetWindowTextW(hPreview_, L"Cannot open disk");
+        return;
+    }
+
+    SectorReader sectorReader(diskHandle, disk->geometry.sector_size);
+
+    // Calculate total file size and allocate buffer
+    uint64_t fileSize = file.file_size;
+    if (fileSize > 10 * 1024 * 1024) {  // Limit preview to 10MB
+        SetWindowTextW(hPreview_, L"File too large\nfor preview");
+        return;
+    }
+
+    AlignedBuffer buffer(static_cast<size_t>(fileSize), disk->geometry.sector_size);
+    if (buffer.empty()) {
+        SetWindowTextW(hPreview_, L"Memory allocation failed");
+        return;
+    }
+
+    // Read file data from fragments
+    uint64_t bytesRead = 0;
+    for (const auto& fragment : file.fragments) {
+        uint64_t fragmentBytes = fragment.sector_count * disk->geometry.sector_size;
+        uint64_t bytesToRead = std::min(fragmentBytes, fileSize - bytesRead);
+
+        uint32_t sectorsToRead = static_cast<uint32_t>((bytesToRead + disk->geometry.sector_size - 1) /
+                                                        disk->geometry.sector_size);
+
+        if (!sectorReader.read_sectors(fragment.start_sector, sectorsToRead, buffer)) {
+            SetWindowTextW(hPreview_, L"Read error");
+            return;
+        }
+
+        bytesRead += bytesToRead;
+        if (bytesRead >= fileSize) break;
+    }
+
+    // Generate thumbnail
+    constexpr int THUMBNAIL_SIZE = 180;
+    HBITMAP hBitmap = nullptr;
+
+    if (business::PreviewManager::IsImageFile(ext)) {
+        hBitmap = previewManager_->CreateThumbnailFromData(
+            buffer.data(), static_cast<size_t>(fileSize),
+            THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+    } else if (business::PreviewManager::IsVideoFile(ext)) {
+        hBitmap = previewManager_->CreateVideoThumbnailFromData(
+            buffer.data(), static_cast<size_t>(fileSize),
+            THUMBNAIL_SIZE, THUMBNAIL_SIZE);
+    }
+
+    if (!hBitmap) {
+        SetWindowTextW(hPreview_, L"Preview failed\n(corrupted data)");
+        return;
+    }
+
+    // Display the bitmap in the static control
+    // Need to change the static control style to SS_BITMAP
+    LONG style = GetWindowLongW(hPreview_, GWL_STYLE);
+    SetWindowLongW(hPreview_, GWL_STYLE, (style & ~SS_CENTER & ~SS_CENTERIMAGE) | SS_BITMAP);
+    SendMessageW(hPreview_, STM_SETIMAGE, IMAGE_BITMAP, reinterpret_cast<LPARAM>(hBitmap));
+
+    // Note: HBITMAP ownership transfers to the static control
+    // It will be deleted when the control is destroyed or a new image is set
 }
 
 } // namespace disk_recover::gui
