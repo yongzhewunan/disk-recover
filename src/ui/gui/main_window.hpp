@@ -125,7 +125,7 @@ private:
 
     // ListView setup
     void SetupListViewColumns();
-    void AddListViewItem(const RecoverableFile& file);
+    void AddListViewItem(const RecoverableFile& file, size_t index);
     void ClearFileList();
 
     // UI state helpers

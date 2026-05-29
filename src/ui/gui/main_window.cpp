@@ -472,7 +472,7 @@ void MainWindow::OnScanProgress(const ScanProgress& progress) {
             SendMessageW(hFileList_, WM_SETREDRAW, FALSE, 0);
             for (const auto& file : newFiles) {
                 foundFiles_.push_back(file);
-                AddListViewItem(file);
+                AddListViewItem(file, foundFiles_.size() - 1);
             }
             SendMessageW(hFileList_, WM_SETREDRAW, TRUE, 0);
             InvalidateRect(hFileList_, nullptr, TRUE);
@@ -663,12 +663,12 @@ void MainWindow::SetupListViewColumns() {
     ListView_InsertColumn(hFileList_, COL_PATH, &col);
 }
 
-void MainWindow::AddListViewItem(const RecoverableFile& file) {
+void MainWindow::AddListViewItem(const RecoverableFile& file, size_t index) {
     LVITEMW item = {};
     item.mask = LVIF_TEXT | LVIF_PARAM;
     item.iItem = ListView_GetItemCount(hFileList_);
     item.pszText = const_cast<wchar_t*>(file.file_name.c_str());
-    item.lParam = static_cast<LPARAM>(foundFiles_.size() - 1);  // Index in foundFiles_
+    item.lParam = static_cast<LPARAM>(index);  // Index in foundFiles_
     int idx = ListView_InsertItem(hFileList_, &item);
 
     // Set size
@@ -944,10 +944,12 @@ void MainWindow::StartRecovery() {
         item.iItem = idx;
         ListView_GetItem(hFileList_, &item);
 
+        // Defensive bounds check - lParam could be invalid if list is corrupted
+        if (item.lParam < 0) continue;
         size_t fileIdx = static_cast<size_t>(item.lParam);
-        if (fileIdx < foundFiles_.size()) {
-            selectedFiles.push_back(foundFiles_[fileIdx]);
-        }
+        if (fileIdx >= foundFiles_.size()) continue;
+
+        selectedFiles.push_back(foundFiles_[fileIdx]);
     }
 
     if (selectedFiles.empty()) {
@@ -1196,7 +1198,7 @@ void MainWindow::LoadDemoData() {
     file1.is_corrupted = false;
     file1.fragments.push_back({1000, 5000});
     foundFiles_.push_back(file1);
-    AddListViewItem(file1);
+    AddListViewItem(file1, foundFiles_.size() - 1);
 
     RecoverableFile file2;
     file2.file_name = L"video_001.mp4";
@@ -1205,7 +1207,7 @@ void MainWindow::LoadDemoData() {
     file2.is_corrupted = false;
     file2.fragments.push_back({5000, 300000});
     foundFiles_.push_back(file2);
-    AddListViewItem(file2);
+    AddListViewItem(file2, foundFiles_.size() - 1);
 
     RecoverableFile file3;
     file3.file_name = L"photo_002.png";
@@ -1214,7 +1216,7 @@ void MainWindow::LoadDemoData() {
     file3.is_corrupted = true;
     file3.fragments.push_back({10000, 2400});
     foundFiles_.push_back(file3);
-    AddListViewItem(file3);
+    AddListViewItem(file3, foundFiles_.size() - 1);
 
     RecoverableFile file4;
     file4.file_name = L"IMG_2023.cr2";
@@ -1223,7 +1225,7 @@ void MainWindow::LoadDemoData() {
     file4.is_corrupted = false;
     file4.fragments.push_back({15000, 50000});
     foundFiles_.push_back(file4);
-    AddListViewItem(file4);
+    AddListViewItem(file4, foundFiles_.size() - 1);
 
     RecoverableFile file5;
     file5.file_name = L"birthday.mov";
@@ -1232,7 +1234,7 @@ void MainWindow::LoadDemoData() {
     file5.is_corrupted = false;
     file5.fragments.push_back({20000, 160000});
     foundFiles_.push_back(file5);
-    AddListViewItem(file5);
+    AddListViewItem(file5, foundFiles_.size() - 1);
 
     EnableWindow(hRecoverBtn_, TRUE);
     UpdateStatus(L"Demo data loaded. Click Scan to simulate scanning, or select files and Recover.");
