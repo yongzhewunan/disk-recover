@@ -33,6 +33,16 @@ public:
         int max_height
     );
 
+    // Generate thumbnail from video file data (first keyframe)
+    // Returns HBITMAP or nullptr on failure
+    // Uses FFmpeg for video decoding with error resilience for corrupted files
+    HBITMAP CreateVideoThumbnailFromData(
+        const uint8_t* data,
+        size_t dataSize,
+        int max_width,
+        int max_height
+    );
+
     // Check if file type is supported for preview
     static bool IsImageFile(const std::wstring& extension) noexcept;
     static bool IsVideoFile(const std::wstring& extension) noexcept;
