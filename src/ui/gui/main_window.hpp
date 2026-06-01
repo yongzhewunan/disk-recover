@@ -57,6 +57,7 @@ private:
     HWND hPartitionLabel_ = nullptr;    // "Partition:" label
     HWND hPartitionList_ = nullptr;     // ComboBox for partition selection
     HWND hScanBtn_ = nullptr;           // Scan button
+    HWND hPauseBtn_ = nullptr;          // Pause/Resume button
     HWND hRecoverBtn_ = nullptr;        // Recover button
     HWND hStopBtn_ = nullptr;           // Stop button
     HWND hFileList_ = nullptr;          // ListView for recoverable files
@@ -146,6 +147,7 @@ private:
     // Operations
     void StartScan();
     void StopScan();
+    void TogglePause();
     void StartRecovery();
     void UpdatePreview(int selectedIndex);
     void LoadDemoData();  // Load demo data for testing without real disk

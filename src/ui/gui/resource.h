@@ -15,6 +15,7 @@
 #define IDC_RECOVER_BTN     1008
 #define IDC_SCAN_MODE       1009
 #define IDC_BAD_SECTOR_POLICY 1010
+#define IDC_PAUSE_BTN        1011
 
 // Menu command IDs (2000-2999)
 #define IDM_SCAN            2001

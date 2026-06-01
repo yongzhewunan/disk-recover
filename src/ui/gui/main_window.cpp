@@ -254,12 +254,15 @@ void MainWindow::OnCreate() {
 
     // Partition label and ComboBox
     hPartitionLabel_ = CreateLabel(hwnd_, L"分区:", col1X, row1Y, PART_LABEL_W, CONTROL_HEIGHT);
-    hPartitionList_ = CreateComboBox(hwnd_, IDC_PARTITION_LIST, col1X + PART_LABEL_W + 4, row1Y, COMBO_WIDTH, CONTROL_HEIGHT + 200);
+    hPartitionList_ = CreateComboBox(hwnd_, IDC_PARTITION_LIST, col1X + PART_LABEL_W + 4, row1Y, COMBO_WIDTH - 86, CONTROL_HEIGHT + 200);
     LOG_FMT(L"[MainWindow] Created partition list ComboBox: hwnd=%p", hPartitionList_);
-    col1X += PART_LABEL_W + 4 + COMBO_WIDTH + MARGIN;
+    col1X += PART_LABEL_W + 4 + COMBO_WIDTH - 86 + MARGIN;
 
     // Buttons
     hScanBtn_ = CreateButton(hwnd_, L"扫描", IDC_SCAN_BTN, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
+    col1X += BUTTON_WIDTH + 6;
+    hPauseBtn_ = CreateButton(hwnd_, L"暂停", IDC_PAUSE_BTN, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
+    EnableWindow(hPauseBtn_, FALSE);
     col1X += BUTTON_WIDTH + 6;
     hRecoverBtn_ = CreateButton(hwnd_, L"恢复", IDC_RECOVER_BTN, col1X, row1Y, BUTTON_WIDTH, CONTROL_HEIGHT);
     EnableWindow(hRecoverBtn_, FALSE);
@@ -377,6 +380,10 @@ void MainWindow::OnCommand(int id, int notifyCode, HWND hCtrl) {
         // Button commands
         case IDC_SCAN_BTN:
             StartScan();
+            break;
+
+        case IDC_PAUSE_BTN:
+            TogglePause();
             break;
 
         case IDC_RECOVER_BTN:
@@ -511,6 +518,7 @@ void MainWindow::OnScanProgress(const ScanProgress& progress) {
 }
 
 void MainWindow::OnScanComplete() {
+    SetWindowTextW(hPauseBtn_, L"暂停");
     EnableControls(false);
     UpdateProgress(100);
 
@@ -703,6 +711,7 @@ void MainWindow::EnableControls(bool scanning) {
     EnableWindow(hScanBtn_, !scanning);
     EnableWindow(hRecoverBtn_, !scanning && !foundFiles_.empty());
     EnableWindow(hStopBtn_, scanning);
+    EnableWindow(hPauseBtn_, scanning);
     // Disable configuration controls during scanning
     EnableWindow(hScanModeCombo_, !scanning);
     EnableWindow(hScanImagesCheck_, !scanning);
@@ -979,10 +988,34 @@ void MainWindow::StopScan() {
 
     LOG_MSG(L"[MainWindow] Stop scan requested");
 
+    // If paused, resume first so stop_scan can join the thread cleanly
+    if (scanManager_->is_paused()) {
+        scanManager_->resume_from_pause();
+    }
+
     // stop_scan() sets the flag and waits for the scan thread to finish
     scanManager_->stop_scan();
 
+    // Reset pause button text
+    SetWindowTextW(hPauseBtn_, L"暂停");
+
     UpdateStatus(L"扫描已停止。");
+}
+
+void MainWindow::TogglePause() {
+    if (!scanManager_ || !scanManager_->is_scanning()) return;
+
+    if (scanManager_->is_paused()) {
+        scanManager_->resume_from_pause();
+        SetWindowTextW(hPauseBtn_, L"暂停");
+        UpdateStatus(L"扫描中...");
+        LOG_MSG(L"[MainWindow] Scan resumed from pause");
+    } else {
+        scanManager_->pause_scan();
+        SetWindowTextW(hPauseBtn_, L"继续");
+        UpdateStatus(L"扫描已暂停。");
+        LOG_MSG(L"[MainWindow] Scan paused");
+    }
 }
 
 void MainWindow::StartRecovery() {
