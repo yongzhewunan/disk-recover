@@ -114,10 +114,9 @@ bool ScanManager::resume_scan(const Config& config) {
     progress_ = saved_progress;
     current_session_id_ = config.session_id;
 
-    Config resume_config = config;
-    resume_config.start_sector = saved_progress.sectors_scanned;
-
-    scan_thread_ = std::thread(&ScanManager::scan_thread_func, this, resume_config);
+    // scan_thread_func will read saved_progress internally via cache_db_
+    // and use scan_phase + raw_resume_sector for phase-based resume
+    scan_thread_ = std::thread(&ScanManager::scan_thread_func, this, config);
     return true;
 }
 

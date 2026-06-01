@@ -293,13 +293,13 @@ void MainWindow::OnCreate() {
     col2X += 70 + 8;
 
     // Bad sector policy label and combo
-    CreateLabel(hwnd_, L"Bad Sectors:", col2X, row2Y, 75, CONTROL_HEIGHT);
-    hBadSectorCombo_ = CreateComboBox(hwnd_, IDC_BAD_SECTOR_POLICY, col2X + 75 + 4, row2Y, 120, CONTROL_HEIGHT + 200);
+    CreateLabel(hwnd_, L"Bad Sectors:", col2X, row2Y, 150, CONTROL_HEIGHT);
+    hBadSectorCombo_ = CreateComboBox(hwnd_, IDC_BAD_SECTOR_POLICY, col2X + 150 + 4, row2Y, 120, CONTROL_HEIGHT + 200);
     ComboBox_AddString(hBadSectorCombo_, L"跳过");
     ComboBox_AddString(hBadSectorCombo_, L"重试3次");
     ComboBox_AddString(hBadSectorCombo_, L"尽力读取");
     ComboBox_SetCurSel(hBadSectorCombo_, 0);
-    col2X += 75 + 4 + 120 + 8;
+    col2X += 150 + 4 + 120 + 8;
 
     // Bad sector count panel
     hBadSectorPanel_ = CreateWindowW(
@@ -653,7 +653,7 @@ void MainWindow::SetupListViewColumns() {
     ListView_InsertColumn(hFileList_, COL_TYPE, &col);
 
     col.pszText = const_cast<wchar_t*>(L"Status");
-    col.cx = 80;
+    col.cx = 120;
     col.iSubItem = COL_STATUS;
     ListView_InsertColumn(hFileList_, COL_STATUS, &col);
 
@@ -682,8 +682,14 @@ void MainWindow::AddListViewItem(const RecoverableFile& file, size_t index) {
     ListView_SetItemText(hFileList_, idx, COL_STATUS,
                          const_cast<wchar_t*>(file.is_corrupted ? L"Corrupted" : L"Good"));
 
-    // Set path (empty for now, could be derived from fragments)
-    ListView_SetItemText(hFileList_, idx, COL_PATH, const_cast<wchar_t*>(L""));
+    // Set path — show start sector of first fragment
+    if (!file.fragments.empty()) {
+        wchar_t pathBuf[64];
+        _snwprintf_s(pathBuf, _TRUNCATE, L"Sector %llu", file.fragments[0].start_sector);
+        ListView_SetItemText(hFileList_, idx, COL_PATH, pathBuf);
+    } else {
+        ListView_SetItemText(hFileList_, idx, COL_PATH, const_cast<wchar_t*>(L""));
+    }
 }
 
 void MainWindow::ClearFileList() {
@@ -862,7 +868,52 @@ void MainWindow::StartScan() {
         return;
     }
 
-    // Clear previous results
+    // Check if there's a resumable scan from a previous interrupted session
+    if (!lastSessionId_.empty() && !lastDbPath_.empty()) {
+        ScanCacheDB check_db;
+        if (check_db.open(lastDbPath_)) {
+            ScanProgress saved;
+            if (check_db.load_progress(lastSessionId_, saved) &&
+                !saved.is_complete && saved.scan_phase > 0) {
+                check_db.close();
+
+                int result = MessageBoxW(hwnd_,
+                    L"上次扫描被中断，是否从断点继续扫描？\n\n"
+                    L"点击[是]继续扫描，点击[否]重新开始。",
+                    L"恢复扫描", MB_YESNO | MB_ICONQUESTION);
+
+                if (result == IDYES) {
+                    ScanManager::Config config;
+                    config.device_path = disk->device_path;
+                    config.db_path = lastDbPath_;
+                    config.session_id = lastSessionId_;
+                    config.mode = static_cast<ScanMode>(ComboBox_GetCurSel(hScanModeCombo_));
+                    config.bad_sector_policy = static_cast<BadSectorPolicy>(ComboBox_GetCurSel(hBadSectorCombo_));
+                    config.scan_images = (Button_GetCheck(hScanImagesCheck_) == BST_CHECKED);
+                    config.scan_videos = (Button_GetCheck(hScanVideosCheck_) == BST_CHECKED);
+                    const PartitionInfo* part = GetSelectedPartition();
+                    if (part && part->sector_count > 0) {
+                        config.start_sector = part->start_sector;
+                        config.end_sector = part->start_sector + part->sector_count;
+                    } else {
+                        config.start_sector = 0;
+                        config.end_sector = disk->geometry.total_sectors;
+                    }
+
+                    if (scanManager_->resume_scan(config)) {
+                        EnableControls(true);
+                        UpdateStatus(L"恢复扫描中...");
+                        return;
+                    }
+                    // Resume failed — fall through to start new scan
+                }
+            } else {
+                check_db.close();
+            }
+        }
+    }
+
+    // Clear previous results for new scan
     ClearFileList();
     UpdateProgress(0);
     badSectorsCount_ = 0;
@@ -881,6 +932,10 @@ void MainWindow::StartScan() {
     config.device_path = disk->device_path;
     config.db_path = GetTempDbPath();
     config.session_id = GenerateSessionId();
+
+    // Save for potential resume
+    lastSessionId_ = config.session_id;
+    lastDbPath_ = config.db_path;
 
     int modeIdx = ComboBox_GetCurSel(hScanModeCombo_);
     config.mode = static_cast<ScanMode>(modeIdx);
@@ -1108,10 +1163,14 @@ void MainWindow::UpdatePreview(int selectedIndex) {
         uint32_t sectorsToRead = static_cast<uint32_t>((bytesToRead + disk->geometry.sector_size - 1) /
                                                         disk->geometry.sector_size);
 
-        if (!sectorReader.read_sectors(fragment.start_sector, sectorsToRead, buffer)) {
+        AlignedBuffer frag_buf(sectorsToRead * disk->geometry.sector_size, disk->geometry.sector_size);
+        if (!sectorReader.read_sectors(fragment.start_sector, sectorsToRead, frag_buf)) {
             SetWindowTextW(hPreview_, L"Read error");
             return;
         }
+
+        // Copy fragment data into the main buffer at the correct offset
+        memcpy(buffer.data() + bytesRead, frag_buf.data(), static_cast<size_t>(bytesToRead));
 
         bytesRead += bytesToRead;
         if (bytesRead >= fileSize) break;

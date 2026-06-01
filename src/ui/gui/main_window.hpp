@@ -90,7 +90,7 @@ private:
     static constexpr int MARGIN = 8;
     static constexpr int CONTROL_HEIGHT = 24;
     static constexpr int BUTTON_WIDTH = 80;
-    static constexpr int COMBO_WIDTH = 220;
+    static constexpr int COMBO_WIDTH = 300;
     static constexpr int PREVIEW_WIDTH = 220;
     static constexpr int STATUSBAR_HEIGHT = 24;
     static constexpr int DISK_LABEL_W = 45;     // "Disk:" label width
@@ -102,6 +102,10 @@ private:
 
     // Batch update tracking
     uint32_t lastDisplayedFileCount_ = 0;  // Files already shown in ListView
+
+    // Resume tracking
+    std::string lastSessionId_;
+    std::wstring lastDbPath_;
 
     // Window lifetime tracking for safe PostMessage
     std::shared_ptr<std::atomic<bool>> windowAlive_;
