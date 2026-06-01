@@ -127,6 +127,8 @@ bool ScanCacheDB::ensure_tables() {
             bad_sectors_hit INTEGER NOT NULL,
             is_paused INTEGER NOT NULL,
             is_complete INTEGER NOT NULL,
+            scan_phase INTEGER NOT NULL DEFAULT 0,
+            raw_resume_sector INTEGER NOT NULL DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -146,7 +148,13 @@ bool ScanCacheDB::ensure_tables() {
     if (errmsg) {
         sqlite3_free(errmsg);
     }
-    return rc == SQLITE_OK;
+    if (rc != SQLITE_OK) return false;
+
+    // Migrate: add scan_phase and raw_resume_sector columns if missing
+    sqlite3_exec(db_, "ALTER TABLE scan_progress ADD COLUMN scan_phase INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "ALTER TABLE scan_progress ADD COLUMN raw_resume_sector INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
+
+    return true;
 }
 
 bool ScanCacheDB::create_session(const std::string& session_id) {
@@ -345,8 +353,8 @@ bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgres
     const char* sql = R"(
         INSERT OR REPLACE INTO scan_progress
             (session_id, sectors_scanned, total_sectors, files_found,
-             bad_sectors_hit, is_paused, is_complete)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+             bad_sectors_hit, is_paused, is_complete, scan_phase, raw_resume_sector)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -360,6 +368,8 @@ bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgres
     sqlite3_bind_int(stmt, 5, static_cast<int>(progress.bad_sectors_hit));
     sqlite3_bind_int(stmt, 6, progress.is_paused ? 1 : 0);
     sqlite3_bind_int(stmt, 7, progress.is_complete ? 1 : 0);
+    sqlite3_bind_int(stmt, 8, static_cast<int>(progress.scan_phase));
+    sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(progress.raw_resume_sector));
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -370,7 +380,7 @@ bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgres
 bool ScanCacheDB::load_progress(const std::string& session_id, ScanProgress& progress) {
     const char* sql = R"(
         SELECT sectors_scanned, total_sectors, files_found, bad_sectors_hit,
-               is_paused, is_complete
+               is_paused, is_complete, scan_phase, raw_resume_sector
         FROM scan_progress
         WHERE session_id = ?
     )";
@@ -390,6 +400,8 @@ bool ScanCacheDB::load_progress(const std::string& session_id, ScanProgress& pro
         progress.bad_sectors_hit = static_cast<uint32_t>(sqlite3_column_int(stmt, 3));
         progress.is_paused = sqlite3_column_int(stmt, 4) != 0;
         progress.is_complete = sqlite3_column_int(stmt, 5) != 0;
+        progress.scan_phase = static_cast<uint8_t>(sqlite3_column_int(stmt, 6));
+        progress.raw_resume_sector = static_cast<uint64_t>(sqlite3_column_int64(stmt, 7));
     }
 
     sqlite3_finalize(stmt);
@@ -462,6 +474,38 @@ std::vector<uint64_t> ScanCacheDB::load_bad_sectors(const std::string& session_i
 
     sqlite3_finalize(stmt);
     return sectors;
+}
+
+std::unordered_set<uint64_t> ScanCacheDB::load_file_keys(const std::string& session_id) {
+    std::unordered_set<uint64_t> keys;
+
+    // Load mft_id values (for NTFS files)
+    const char* sql_mft = "SELECT mft_id FROM scan_result WHERE session_id = ? AND mft_id IS NOT NULL";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql_mft, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            keys.insert(static_cast<uint64_t>(sqlite3_column_int64(stmt, 0)));
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Load start_sector from fragments BLOB (for RAW files)
+    const char* sql_frag = "SELECT fragments FROM scan_result WHERE session_id = ? AND mft_id IS NULL AND fragments IS NOT NULL";
+    if (sqlite3_prepare_v2(db_, sql_frag, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const void* frag_data = sqlite3_column_blob(stmt, 0);
+            int frag_size = sqlite3_column_bytes(stmt, 0);
+            auto fragments = deserialize_fragments(frag_data, frag_size);
+            if (!fragments.empty()) {
+                keys.insert(fragments[0].start_sector);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    return keys;
 }
 
 } // namespace disk_recover

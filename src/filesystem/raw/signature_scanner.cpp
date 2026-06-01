@@ -3,6 +3,7 @@
 #include "file_signatures.hpp"
 #include "../common/logger.hpp"
 #include <algorithm>
+#include <chrono>
 
 namespace disk_recover {
 
@@ -291,14 +292,35 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
     ScanProgress progress{};
     progress.total_sectors = config.end_sector - config.start_sector;
 
-    LOG_FMT(L"[SigScanner] Starting RAW scan: sector %llu to %llu, total=%llu",
-             config.start_sector, config.end_sector, progress.total_sectors);
-
     const uint32_t sector_size = reader.sector_size();
-    const uint32_t sectors_per_chunk = 64;
-    AlignedBuffer buf(sectors_per_chunk * sector_size, sector_size);
+    const uint32_t BATCH_SECTORS = 256;
 
-    if (buf.empty()) {
+    // Compute scan start with overlap for resume
+    uint64_t scan_start = config.start_sector;
+    uint64_t initial_scanned = 0;
+
+    if (config.resume_from_sector > config.start_sector) {
+        if (config.resume_from_sector >= 64) {
+            scan_start = std::max(config.start_sector, config.resume_from_sector - 64);
+        } else {
+            scan_start = config.start_sector;
+        }
+        uint64_t offset = config.resume_from_sector - config.start_sector;
+        if (offset < 64) {
+            initial_scanned = 0;
+        } else {
+            initial_scanned = offset - 64;
+        }
+    }
+
+    progress.sectors_scanned = initial_scanned;
+
+    LOG_FMT(L"[SigScanner] Starting RAW scan: sector %llu to %llu, total=%llu, resume_from=%llu, scan_start=%llu",
+             config.start_sector, config.end_sector, progress.total_sectors,
+             config.resume_from_sector, scan_start);
+
+    AlignedBuffer batch_buf(BATCH_SECTORS * sector_size, sector_size);
+    if (batch_buf.empty()) {
         LOG_MSG(L"[SigScanner] Failed to allocate scan buffer");
         progress.is_complete = true;
         if (on_progress) on_progress(progress);
@@ -306,40 +328,52 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
     }
 
     uint32_t sig_count = 0;
-    uint64_t last_report_sector = config.start_sector;
-    uint64_t claimed_end_sector = 0;  // Sectors already claimed by a previous file
-    std::vector<RecoverableFile> video_files;  // Buffer video files for merging
+    uint64_t claimed_end_sector = 0;
+    std::vector<RecoverableFile> video_files;
 
-    for (uint64_t sector = config.start_sector;
-         sector < config.end_sector;
-         sector += sectors_per_chunk) {
+    // Time + distance dual threshold for progress save
+    auto last_save_time = std::chrono::steady_clock::now();
+    uint64_t last_save_sector = scan_start;
+    uint32_t consecutive_bad_batches = 0;
 
+    for (uint64_t sector = scan_start; sector < config.end_sector; sector += BATCH_SECTORS) {
         if (config.should_stop && config.should_stop()) {
             LOG_MSG(L"[SigScanner] Stop requested, exiting scan loop");
             break;
         }
 
-        uint32_t count = std::min(sectors_per_chunk,
-            static_cast<uint32_t>(config.end_sector - sector));
+        uint32_t batch_count = std::min(BATCH_SECTORS, static_cast<uint32_t>(config.end_sector - sector));
+        uint32_t bad_count = 0;
 
-        if (!reader.read_sectors_checked(sector, count, buf)) {
-            progress.sectors_scanned += count;
-            progress.bad_sectors_hit++;
-            if (sector - last_report_sector >= 20480) {
-                last_report_sector = sector;
-                if (on_progress) on_progress(progress);
+        bool ok = reader.read_sectors_split(sector, batch_count, batch_buf, bad_count, config.should_stop);
+
+        if (bad_count == batch_count) {
+            consecutive_bad_batches++;
+            if (consecutive_bad_batches >= 4) {
+                uint64_t actual_skip = std::min<uint64_t>(1024, config.end_sector - sector);
+                progress.sectors_scanned += actual_skip;
+                progress.bad_sectors_hit += actual_skip;
+                if (actual_skip >= BATCH_SECTORS) {
+                    sector += (actual_skip - BATCH_SECTORS);
+                } else {
+                    sector -= (BATCH_SECTORS - actual_skip);
+                }
+                consecutive_bad_batches = 0;
+                LOG_FMT(L"[SigScanner] Adaptive skip: jumping past bad cluster to sector %llu", sector + BATCH_SECTORS);
+                continue;
             }
-            continue;
+        } else {
+            consecutive_bad_batches = 0;
         }
 
-        for (uint32_t offset = 0; offset < count * sector_size;
-             offset += sector_size) {
-            uint64_t cur_sector = sector + offset / sector_size;
+        // Scan batch buffer for signatures
+        for (uint32_t i = 0; i < batch_count; ++i) {
+            const uint8_t* data = batch_buf.data() + i * sector_size;
+            uint64_t cur_sector = sector + i;
 
-            // Skip sectors already claimed by a previous file
             if (cur_sector < claimed_end_sector) continue;
 
-            auto sig = FileSignatures::match(buf.data() + offset, sector_size);
+            auto sig = FileSignatures::match(data, sector_size);
             if (!sig) continue;
 
             if (sig->file_type == FileType::Image && !config.scan_images) continue;
@@ -350,7 +384,6 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
             if (try_recover_file(reader, cur_sector, *sig, file)) {
                 progress.files_found++;
 
-                // Mark sectors as claimed so we don't create duplicate entries
                 uint64_t file_end = cur_sector;
                 for (const auto& frag : file.fragments) {
                     file_end = std::max(file_end, frag.start_sector + frag.sector_count);
@@ -361,7 +394,6 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
                     LOG_FMT(L"[SigScanner] Found %s at sector %llu, size=%llu",
                              sig->description.c_str(), cur_sector, file.file_size);
                 }
-                // Buffer video files for merging, emit images immediately
                 if (file.file_type == FileType::Video) {
                     video_files.push_back(std::move(file));
                 } else {
@@ -370,9 +402,17 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
             }
         }
 
-        progress.sectors_scanned += count;
-        if (sector - last_report_sector >= 20480) {
-            last_report_sector = sector;
+        progress.sectors_scanned += batch_count;
+        progress.bad_sectors_hit += bad_count;
+
+        // Time + distance dual threshold for progress callback
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_save_time).count();
+        uint64_t sectors_since_save = sector - last_save_sector;
+
+        if ((elapsed >= 5) || (sectors_since_save >= 204800 && elapsed >= 1)) {
+            last_save_time = now;
+            last_save_sector = sector;
             if (on_progress) on_progress(progress);
         }
     }
@@ -380,7 +420,6 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
     LOG_FMT(L"[SigScanner] RAW scan complete: signatures=%u, files_found=%llu, sectors_scanned=%llu",
              sig_count, progress.files_found, progress.sectors_scanned);
 
-    // Merge video fragments
     auto merged = merge_video_fragments(video_files, sector_size);
     for (auto& file : merged) {
         if (on_file_found) on_file_found(std::move(file));
@@ -397,7 +436,6 @@ bool SignatureScanner::try_recover_file(SectorReader& reader, uint64_t start_sec
     file.file_type = sig.file_type;
     file.file_name = sig.description + L"_sector_" + std::to_wstring(start_sector)
                      + L"." + sig.extension;
-    file.is_corrupted = true;
 
     // Read a larger chunk starting from this sector to parse header for actual size
     // Read up to 4 sectors (2KB) for header parsing
@@ -405,11 +443,14 @@ bool SignatureScanner::try_recover_file(SectorReader& reader, uint64_t start_sec
     AlignedBuffer headerBuf(HEADER_SECTORS * sector_size, sector_size);
     bool header_ok = reader.read_sectors_checked(start_sector, HEADER_SECTORS, headerBuf);
 
+    // If we can read the header and parse a valid size, the file is likely intact.
+    // If header read fails, the file is corrupted.
     uint64_t estimated_size = 0;
     if (header_ok) {
         estimated_size = parse_file_size(sig.file_type, headerBuf.data(),
                                           HEADER_SECTORS * sector_size);
     }
+    file.is_corrupted = !header_ok;
 
     // If we couldn't parse size from header, use type-based defaults
     // with reasonable caps to avoid absurd sizes

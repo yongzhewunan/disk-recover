@@ -12,6 +12,7 @@ public:
         uint64_t start_sector = 0;
         uint64_t end_sector = 0;
         uint32_t step_sectors = 1;
+        uint64_t resume_from_sector = 0;  // Absolute sector LBA to resume from (0 = start fresh)
         bool scan_images = true;
         bool scan_videos = true;
         std::function<bool()> should_stop;  // Called to check if scan should stop

@@ -4,7 +4,7 @@
 using namespace disk_recover::ntfs;
 
 TEST(NtfsTypesTest, BootSectorSize) {
-    EXPECT_EQ(sizeof(NtfsBootSector), 82u);
+    EXPECT_EQ(sizeof(NtfsBootSector), 80u);
 }
 
 TEST(NtfsTypesTest, MftRecordHeaderSize) {

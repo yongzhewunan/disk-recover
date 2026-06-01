@@ -71,6 +71,8 @@ struct ScanProgress {
     uint32_t bad_sectors_hit = 0;
     bool is_paused = false;
     bool is_complete = false;
+    uint8_t scan_phase = 0;         // 0=not started, 1=metadata done, 2=raw in progress
+    uint64_t raw_resume_sector = 0; // Absolute LBA for RAW scan resume
 };
 
 } // namespace disk_recover

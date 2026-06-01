@@ -173,6 +173,24 @@ void ScanManager::scan_thread_func(Config config) {
     uint64_t start_sector = config.start_sector;
     uint64_t end_sector = (config.end_sector > 0) ? config.end_sector : geo.total_sectors;
 
+    // Load saved progress for phase-based resume
+    ScanProgress saved_progress{};
+    bool has_saved = cache_db_.load_progress(config.session_id, saved_progress);
+
+    // Load existing file keys for dedup
+    auto existing_keys = cache_db_.load_file_keys(config.session_id);
+
+    // If resuming and metadata phase already done, skip to RAW
+    bool skip_metadata = has_saved && saved_progress.scan_phase >= 1;
+
+    if (skip_metadata) {
+        // Restore progress counters from saved state
+        progress_.sectors_scanned = saved_progress.sectors_scanned;
+        progress_.files_found = saved_progress.files_found;
+        progress_.bad_sectors_hit = saved_progress.bad_sectors_hit;
+        LOG_FMT(L"[ScanManager] Resuming: skipping metadata phase, scan_phase=%u", saved_progress.scan_phase);
+    }
+
     {
         std::lock_guard lock(progress_mutex_);
         progress_.total_sectors = end_sector - start_sector;
@@ -181,13 +199,17 @@ void ScanManager::scan_thread_func(Config config) {
     LOG_FMT(L"[ScanManager] Scan range: sector %llu to %llu (%llu sectors)",
              start_sector, end_sector, progress_.total_sectors);
 
-    auto on_file = [this](RecoverableFile&& file) {
+    auto on_file = [this, &existing_keys](RecoverableFile&& file) {
         if (stop_requested_.load()) return;
-        {
-            std::lock_guard lock(progress_mutex_);
-            progress_.files_found++;
-        }
+
+        // Dedup: skip files already found in previous scan
+        uint64_t key = file.mft_id.has_value() ? file.mft_id.value() :
+                       (file.fragments.empty() ? 0 : file.fragments[0].start_sector);
+        if (key && existing_keys.count(key)) return;
+        existing_keys.insert(key);
+
         bool need_flush = false;
+        bool need_progress = false;
         {
             std::lock_guard lock(files_mutex_);
             ui_files_.push_back(file);  // Copy for UI
@@ -195,9 +217,17 @@ void ScanManager::scan_thread_func(Config config) {
             if (pending_files_.size() >= FLUSH_THRESHOLD) {
                 need_flush = true;
             }
+            need_progress = (ui_files_.size() % 20 == 0);
+        }
+        {
+            std::lock_guard lock(progress_mutex_);
+            progress_.files_found++;
         }
         if (need_flush) {
             flush_cache(current_session_id_);
+        }
+        if (need_progress && on_progress_) {
+            on_progress_(progress_);
         }
     };
 
@@ -210,6 +240,7 @@ void ScanManager::scan_thread_func(Config config) {
             std::lock_guard lock(progress_mutex_);
             progress_.sectors_scanned = p.sectors_scanned;
             progress_.bad_sectors_hit = p.bad_sectors_hit;
+            progress_.raw_resume_sector = p.sectors_scanned;
         }
         cache_db_.save_progress(current_session_id_, progress_);
         if (on_progress_) on_progress_(progress_);
@@ -232,7 +263,8 @@ void ScanManager::scan_thread_func(Config config) {
                         ntfs::MftParser parser;
                         if (parser.parse_boot_sector(reader, start_sector)) {
                             LOG_MSG(L"[ScanManager] Parsing NTFS MFT...");
-                            parser.enumerate_mft(reader, on_file, true);
+                            parser.enumerate_mft(reader, on_file, true,
+                                [this]() { return stop_requested_.load(); });
                             {
                                 std::lock_guard lock(progress_mutex_);
                                 progress_.sectors_scanned = parser.mft_start_sector() +
@@ -252,7 +284,8 @@ void ScanManager::scan_thread_func(Config config) {
                         fat::FatParser parser;
                         if (parser.parse_boot_sector(reader, start_sector)) {
                             LOG_MSG(L"[ScanManager] Parsing FAT root directory...");
-                            parser.enumerate_root_dir(reader, on_file, true);
+                            parser.enumerate_root_dir(reader, on_file, true,
+                                [this]() { return stop_requested_.load(); });
                             {
                                 std::lock_guard lock(progress_mutex_);
                                 progress_.sectors_scanned = parser.data_start_sector();
@@ -302,46 +335,64 @@ void ScanManager::scan_thread_func(Config config) {
                 LOG_FMT(L"[ScanManager] Detected file system type: %d", static_cast<int>(fs_type));
                 uint64_t metadata_end_sector = 0;
 
-                switch (fs_type) {
-                case FileSystemType::NTFS:
-                    {
-                        ntfs::MftParser parser;
-                        if (parser.parse_boot_sector(reader, start_sector)) {
-                            LOG_MSG(L"[ScanManager] Phase 1: Parsing NTFS MFT...");
-                            parser.enumerate_mft(reader, on_file, true);
-                            metadata_end_sector = parser.mft_start_sector() +
-                                (geo.total_sectors / parser.mft_record_size());
-                            {
-                                std::lock_guard lock(progress_mutex_);
-                                progress_.sectors_scanned = metadata_end_sector;
+                // Phase 1: metadata scan (skip if already done from resume)
+                if (!skip_metadata) {
+                    switch (fs_type) {
+                    case FileSystemType::NTFS:
+                        {
+                            ntfs::MftParser parser;
+                            if (parser.parse_boot_sector(reader, start_sector)) {
+                                LOG_MSG(L"[ScanManager] Phase 1: Parsing NTFS MFT...");
+                                parser.enumerate_mft(reader, on_file, true,
+                                    [this]() { return stop_requested_.load(); });
+                                metadata_end_sector = parser.mft_start_sector() +
+                                    (geo.total_sectors / parser.mft_record_size());
+                                {
+                                    std::lock_guard lock(progress_mutex_);
+                                    progress_.sectors_scanned = metadata_end_sector;
+                                }
+                                if (on_progress_) on_progress_(progress_);
                             }
-                            if (on_progress_) on_progress_(progress_);
                         }
-                    }
-                    break;
+                        break;
 
-                case FileSystemType::FAT12:
-                case FileSystemType::FAT16:
-                case FileSystemType::FAT32:
-                    {
-                        fat::FatParser parser;
-                        if (parser.parse_boot_sector(reader, start_sector)) {
-                            LOG_MSG(L"[ScanManager] Phase 1: Parsing FAT root directory...");
-                            parser.enumerate_root_dir(reader, on_file, true);
-                            metadata_end_sector = parser.data_start_sector();
-                            {
-                                std::lock_guard lock(progress_mutex_);
-                                progress_.sectors_scanned = metadata_end_sector;
+                    case FileSystemType::FAT12:
+                    case FileSystemType::FAT16:
+                    case FileSystemType::FAT32:
+                        {
+                            fat::FatParser parser;
+                            if (parser.parse_boot_sector(reader, start_sector)) {
+                                LOG_MSG(L"[ScanManager] Phase 1: Parsing FAT root directory...");
+                                parser.enumerate_root_dir(reader, on_file, true,
+                                    [this]() { return stop_requested_.load(); });
+                                metadata_end_sector = parser.data_start_sector();
+                                {
+                                    std::lock_guard lock(progress_mutex_);
+                                    progress_.sectors_scanned = metadata_end_sector;
+                                }
+                                if (on_progress_) on_progress_(progress_);
                             }
-                            if (on_progress_) on_progress_(progress_);
                         }
-                    }
-                    break;
+                        break;
 
-                case FileSystemType::ExFAT:
-                case FileSystemType::Unknown:
-                    metadata_end_sector = start_sector;
-                    break;
+                    case FileSystemType::ExFAT:
+                    case FileSystemType::Unknown:
+                        metadata_end_sector = start_sector;
+                        break;
+                    }
+
+                    // Mark phase 1 complete and save
+                    {
+                        std::lock_guard lock(progress_mutex_);
+                        progress_.scan_phase = 1;
+                    }
+                    cache_db_.save_progress(current_session_id_, progress_);
+                }
+
+                // Phase 2: RAW scan
+                {
+                    std::lock_guard lock(progress_mutex_);
+                    progress_.scan_phase = 2;
                 }
 
                 if (metadata_end_sector < end_sector && !stop_requested_.load()) {
@@ -354,6 +405,13 @@ void ScanManager::scan_thread_func(Config config) {
                     scan_config.scan_images = config.scan_images;
                     scan_config.scan_videos = config.scan_videos;
                     scan_config.should_stop = [this]() { return stop_requested_.load(); };
+
+                    // Set resume point if resuming from phase 2
+                    if (has_saved && saved_progress.scan_phase >= 2 && saved_progress.raw_resume_sector > metadata_end_sector) {
+                        scan_config.resume_from_sector = saved_progress.raw_resume_sector;
+                        LOG_FMT(L"[ScanManager] Resuming RAW scan from sector %llu", saved_progress.raw_resume_sector);
+                    }
+
                     scanner.scan(reader, scan_config, on_file, on_scan_progress);
                 }
             }
@@ -369,6 +427,13 @@ void ScanManager::scan_thread_func(Config config) {
                 scan_config.scan_images = config.scan_images;
                 scan_config.scan_videos = config.scan_videos;
                 scan_config.should_stop = [this]() { return stop_requested_.load(); };
+
+                // Set resume point if resuming
+                if (has_saved && saved_progress.raw_resume_sector > start_sector) {
+                    scan_config.resume_from_sector = saved_progress.raw_resume_sector;
+                    LOG_FMT(L"[ScanManager] Resuming full scan from sector %llu", saved_progress.raw_resume_sector);
+                }
+
                 scanner.scan(reader, scan_config, on_file, on_scan_progress);
             }
             break;

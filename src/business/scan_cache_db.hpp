@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <unordered_set>
 
 struct sqlite3;
 
@@ -29,6 +30,8 @@ public:
     bool save_bad_sectors(const std::string& session_id,
                           const std::vector<uint64_t>& sectors);
     std::vector<uint64_t> load_bad_sectors(const std::string& session_id);
+
+    std::unordered_set<uint64_t> load_file_keys(const std::string& session_id);
 
 private:
     sqlite3* db_ = nullptr;
