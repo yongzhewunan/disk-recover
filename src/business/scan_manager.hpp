@@ -37,9 +37,6 @@ public:
     ScanManager() = default;
     ~ScanManager() {
         stop_scan();
-        if (scan_thread_.joinable()) {
-            scan_thread_.join();
-        }
     }
 
     // Non-copyable: owns a thread

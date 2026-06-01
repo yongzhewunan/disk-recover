@@ -64,6 +64,11 @@ static FileSystemType detect_filesystem(SectorReader& reader, uint64_t partition
 bool ScanManager::start_scan(const Config& config) {
     if (scanning_.load()) return false;
 
+    // Join any previous scan thread before starting a new one
+    if (scan_thread_.joinable()) {
+        scan_thread_.join();
+    }
+
     scanning_ = true;
     paused_ = false;
     stop_requested_ = false;
@@ -82,6 +87,11 @@ bool ScanManager::start_scan(const Config& config) {
 
 bool ScanManager::resume_scan(const Config& config) {
     if (scanning_.load()) return false;
+
+    // Join any previous scan thread before starting a new one
+    if (scan_thread_.joinable()) {
+        scan_thread_.join();
+    }
 
     if (!cache_db_.open(config.db_path)) {
         return false;
@@ -114,10 +124,13 @@ bool ScanManager::resume_scan(const Config& config) {
 void ScanManager::pause_scan() { paused_ = true; }
 void ScanManager::resume_from_pause() { paused_ = false; }
 
-// IMPORTANT: stop_scan() only sets the flag. All cleanup (flush, close DB)
-// happens in scan_thread_func when it sees the flag. This avoids races.
+// stop_scan() sets the stop flag and waits for the scan thread to finish.
+// This ensures the ScanManager is in a clean state before a new scan can start.
 void ScanManager::stop_scan() {
     stop_requested_ = true;
+    if (scan_thread_.joinable()) {
+        scan_thread_.join();
+    }
 }
 
 ScanProgress ScanManager::progress() const {

@@ -871,6 +871,11 @@ void MainWindow::StartScan() {
         SetWindowTextW(hBadSectorPanel_, L"Bad: 0");
     }
 
+    // Stop any previous scan before starting a new one
+    if (scanManager_ && scanManager_->is_scanning()) {
+        scanManager_->stop_scan();
+    }
+
     // Configure scan
     ScanManager::Config config;
     config.device_path = disk->device_path;
@@ -919,12 +924,10 @@ void MainWindow::StopScan() {
 
     LOG_MSG(L"[MainWindow] Stop scan requested");
 
-    // Only set the stop flag - the scan thread handles cleanup
+    // stop_scan() sets the flag and waits for the scan thread to finish
     scanManager_->stop_scan();
 
-    // Wait briefly for the scan thread to finish (it's detached, so we
-    // just update UI and let the scan thread send WM_SCAN_COMPLETE when done)
-    UpdateStatus(L"正在停止扫描...");
+    UpdateStatus(L"扫描已停止。");
 }
 
 void MainWindow::StartRecovery() {
