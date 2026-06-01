@@ -5,7 +5,7 @@
 #include "disk-io/sector_reader.hpp"
 #include "disk-io/aligned_buffer.hpp"
 #include "business/scan_manager.hpp"
-#include "business/recover_manager.hpp"
+#include "business/recovery_manager.hpp"
 #include "business/multi_target_writer.hpp"
 #include "business/scan_cache_db.hpp"
 #include "business/preview_manager.hpp"
@@ -246,74 +246,63 @@ int main(int argc, char** argv) {
 
     // recover
     std::string recover_session, recover_db, recover_output, recover_filter;
+    std::string recover_device;
     bool auto_switch = true;
 
     auto recover_cmd = app.add_subcommand("recover", "恢复扫描结果中的文件");
     recover_cmd->add_option("session", recover_session, "扫描会话ID")->required();
     recover_cmd->add_option("--db", recover_db, "缓存数据库路径")->default_val("scan_cache.db");
     recover_cmd->add_option("--output,-o", recover_output, "目标输出目录")->required();
+    recover_cmd->add_option("--device", recover_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)");
     recover_cmd->add_option("--filter", recover_filter, "文件名过滤模式（支持通配符 * 和 ?，逗号分隔多个）");
     recover_cmd->add_flag("--auto-switch", auto_switch, "空间不足自动切换到下一个目标");
 
     recover_cmd->callback([&]() {
-        ScanCacheDB db;
+        if (recover_device.empty()) {
+            std::cerr << "错误: 需要指定设备路径 (--device)\n";
+            return;
+        }
+
         std::wstring db_path = std::wstring(recover_db.begin(), recover_db.end());
-        if (!db.open(db_path)) {
-            std::cerr << "无法打开数据库: " << recover_db << "\n";
-            return;
-        }
+        std::wstring output_path = std::wstring(recover_output.begin(), recover_output.end());
+        std::wstring device_path = std::wstring(recover_device.begin(), recover_device.end());
 
-        uint32_t file_count = db.query_file_count(recover_session);
-        if (file_count == 0) {
-            std::cout << "会话 " << recover_session << " 中没有可恢复的文件\n";
-            db.close();
-            return;
-        }
-
-        // Convert filter pattern to wstring
-        std::wstring filter_patterns = std::wstring(recover_filter.begin(), recover_filter.end());
-
-        std::cout << "找到 " << file_count << " 个文件待恢复\n";
-        if (!recover_filter.empty()) {
-            std::cout << "过滤模式: " << recover_filter << "\n";
-        }
-        std::cout << "输出目录: " << recover_output << "\n";
-
-        // 创建输出目录
+        // Create output directory
         std::filesystem::create_directories(recover_output);
 
-        MultiTargetWriter writer;
-        writer.add_target(std::wstring(recover_output.begin(), recover_output.end()));
-        writer.set_auto_switch(auto_switch);
+        // Build RecoveryConfig
+        RecoveryConfig config;
+        config.session_id = recover_session;
+        config.db_path = db_path;
+        config.source_disk_path = device_path;
+        config.sector_size = 512;  // Will be auto-detected from disk geometry
+        config.min_free_bytes = 1ULL << 30;
 
-        // 获取设备路径（从第一个文件的 fragments 推断，简化处理）
-        DiskHandle handle;
-        // 注：完整实现需要从数据库或配置中获取设备路径
-        // 这里仅作为示例
+        SaveDirEntry dir_entry;
+        dir_entry.path = output_path;
+        config.save_dirs.push_back(dir_entry);
 
-        uint32_t batch_size = 100;
-        uint32_t recovered = 0;
-        uint32_t filtered_count = 0;
-
-        for (uint32_t offset = 0; offset < file_count; offset += batch_size) {
-            auto files = db.query_files(recover_session, batch_size, offset);
-            for (const auto& file : files) {
-                // Apply filter if specified
-                if (!matches_any_pattern(file.file_name, filter_patterns)) {
-                    filtered_count++;
-                    continue;
-                }
-                std::wcout << L"恢复: " << file.file_name << L"\n";
-                recovered++;
-            }
-            std::cout << "进度: " << (offset + files.size()) << "/" << file_count << "\n";
+        RecoveryManager recovery_mgr;
+        if (!recovery_mgr.start_recovery(config)) {
+            std::cerr << "启动恢复失败\n";
+            return;
         }
 
-        std::cout << "\n恢复完成: " << recovered << " 个文件\n";
-        if (filtered_count > 0) {
-            std::cout << "已过滤: " << filtered_count << " 个文件\n";
+        std::cout << "恢复进行中...\n";
+        while (recovery_mgr.is_recovering()) {
+            auto stats = recovery_mgr.stats();
+            double pct = stats.total_files ? (100.0 * stats.files_recovered / stats.total_files) : 0;
+            std::cout << "\r进度: " << static_cast<int>(pct) << "% | "
+                      << "已恢复: " << stats.files_recovered << "/" << stats.total_files << " | "
+                      << "失败: " << stats.files_failed << std::flush;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        db.close();
+
+        auto stats = recovery_mgr.stats();
+        std::cout << "\n\n恢复完成\n";
+        std::cout << "总文件: " << stats.total_files << "\n";
+        std::cout << "已恢复: " << stats.files_recovered << "\n";
+        std::cout << "失败: " << stats.files_failed << "\n";
     });
 
     // progress

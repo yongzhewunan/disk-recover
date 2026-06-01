@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "business/multi_target_writer.hpp"
-#include "business/recover_manager.hpp"
+#include "business/recovery_manager.hpp"
 #include <filesystem>
 
 using namespace disk_recover;
@@ -50,10 +50,18 @@ TEST_F(MultiTargetWriterTest, AutoSwitchEnabled) {
     EXPECT_FALSE(writer.auto_switch_enabled());
 }
 
-TEST(RecoverReportTest, DefaultValues) {
-    RecoverReport report;
-    EXPECT_EQ(report.total_files, 0u);
-    EXPECT_EQ(report.success_count, 0u);
-    EXPECT_EQ(report.failed_count, 0u);
-    EXPECT_EQ(report.total_bytes_recovered, 0u);
+TEST(RecoveryStatsTest, DefaultValues) {
+    RecoveryManager::RecoveryStats stats;
+    EXPECT_EQ(stats.files_recovered, 0u);
+    EXPECT_EQ(stats.bytes_recovered, 0u);
+    EXPECT_EQ(stats.total_files, 0u);
+    EXPECT_EQ(stats.files_failed, 0u);
+}
+
+TEST(RecoveryConfigTest, DefaultValues) {
+    RecoveryConfig config;
+    EXPECT_TRUE(config.save_dirs.empty());
+    EXPECT_EQ(config.sector_size, 512u);
+    EXPECT_EQ(config.min_free_bytes, 1ULL << 30);
+    EXPECT_EQ(config.hwnd, nullptr);
 }

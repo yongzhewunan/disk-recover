@@ -25,12 +25,12 @@ public:
     uint64_t write(const uint8_t* data, uint64_t size);
     bool open_file(const std::wstring& relative_path);
     void close_file();
+    bool switch_to_next_target();
 
     const std::vector<TargetDisk>& targets() const { return targets_; }
     size_t current_index() const { return current_; }
 
 private:
-    bool switch_to_next_target();
 
     std::vector<TargetDisk> targets_;
     size_t current_ = 0;

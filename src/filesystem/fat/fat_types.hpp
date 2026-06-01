@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 
 namespace disk_recover::fat {
 
 enum class FatType { Unknown, Fat12, Fat16, Fat32 };
 
+#pragma pack(push, 1)
 struct FatBootSector {
     uint8_t  jump[3];
     uint8_t  oem_id[8];
@@ -46,6 +47,7 @@ struct FatBootSector {
         } fat32_ext;
     } ext;
 };
+#pragma pack(pop)
 
 constexpr uint32_t FAT12_EOC = 0x0FF8;
 constexpr uint32_t FAT16_EOC = 0xFFF8;

@@ -9,6 +9,16 @@ struct sqlite3;
 
 namespace disk_recover {
 
+struct RecoveryProgress {
+    std::string session_id;
+    int last_file_index = 0;          // Last recovered file offset
+    std::string save_dirs_json;       // JSON array of save directories
+    uint64_t files_recovered = 0;
+    uint64_t bytes_recovered = 0;
+    bool is_paused = false;
+    std::string ext_counters_json;    // JSON: {"D:\\Rec\\":{"jpg":2,"png":1}}
+};
+
 class ScanCacheDB {
 public:
     ~ScanCacheDB();
@@ -26,6 +36,10 @@ public:
 
     bool save_progress(const std::string& session_id, const ScanProgress& progress);
     bool load_progress(const std::string& session_id, ScanProgress& progress);
+
+    bool save_recovery_progress(const RecoveryProgress& progress);
+    bool load_recovery_progress(const std::string& session_id, RecoveryProgress& progress);
+    bool clear_recovery_progress(const std::string& session_id);
 
     bool save_bad_sectors(const std::string& session_id,
                           const std::vector<uint64_t>& sectors);

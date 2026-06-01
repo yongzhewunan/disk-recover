@@ -1,15 +1,77 @@
 #include "mft_parser.hpp"
+#include "../../common/logger.hpp"
 #include <cstring>
+#include <algorithm>
 
 namespace disk_recover::ntfs {
+
+void MftParser::apply_usa_fixup(uint8_t* data, uint32_t size, uint32_t sector_size) {
+    auto* hdr = reinterpret_cast<const MftRecordHeader*>(data);
+    uint16_t usa_offset = hdr->usa_offset;
+    uint16_t usa_count = hdr->usa_count;
+
+    if (usa_offset == 0 || usa_count <= 1 || usa_offset + usa_count * 2 > size) return;
+
+    // USA array: entry 0 = sequence number, entries 1..usa_count-1 = saved bytes
+    const uint16_t* usa = reinterpret_cast<const uint16_t*>(data + usa_offset);
+    uint16_t sequence = usa[0];
+
+    // Each sector i (1-based) has its last 2 bytes overwritten by USA.
+    // Restore them from the USA array.
+    uint32_t num_sectors = size / sector_size;
+    for (uint32_t i = 1; i < usa_count && i <= num_sectors; ++i) {
+        uint32_t sector_end = i * sector_size;
+        if (sector_end < 2 || sector_end > size) continue;
+        uint16_t* last_two = reinterpret_cast<uint16_t*>(data + sector_end - 2);
+        // Verify the sequence number matches (if not, record may be corrupt)
+        if (*last_two == sequence) {
+            *last_two = usa[i];
+        }
+    }
+}
+
+FileType MftParser::detect_file_type(const std::wstring& filename) {
+    size_t dot = filename.rfind(L'.');
+    if (dot == std::wstring::npos || dot + 1 >= filename.size()) return FileType::Unknown;
+
+    std::wstring ext = filename.substr(dot + 1);
+    // Convert to lowercase for comparison
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+    static const wchar_t* image_exts[] = {
+        L"jpg", L"jpeg", L"png", L"gif", L"bmp", L"tiff", L"tif",
+        L"cr2", L"nef", L"arw", L"dng", L"webp", L"ico", L"heic",
+        L"raw", L"psd", L"svg", L"jfif"
+    };
+    static const wchar_t* video_exts[] = {
+        L"mp4", L"mov", L"avi", L"mkv", L"webm", L"flv",
+        L"wmv", L"m4v", L"3gp", L"mts", L"m2ts", L"vob",
+        L"asf", L"rm", L"rmvb"
+    };
+
+    for (const auto* e : image_exts) {
+        if (ext == e) return FileType::Image;
+    }
+    for (const auto* e : video_exts) {
+        if (ext == e) return FileType::Video;
+    }
+    return FileType::Unknown;
+}
 
 bool MftParser::parse_boot_sector(SectorReader& reader, uint64_t partition_start) {
     partition_start_ = partition_start;
     AlignedBuffer buf(reader.sector_size(), reader.sector_size());
-    if (!reader.read_sectors(partition_start, 1, buf)) return false;
+    if (!reader.read_sectors(partition_start, 1, buf)) {
+        LOG_FMT(L"[MftParser] Failed to read boot sector at %llu", partition_start);
+        return false;
+    }
 
     auto* boot = reinterpret_cast<const NtfsBootSector*>(buf.data());
-    if (boot->bytes_per_sector == 0 || boot->sectors_per_cluster == 0) return false;
+    if (boot->bytes_per_sector == 0 || boot->sectors_per_cluster == 0) {
+        LOG_FMT(L"[MftParser] Invalid boot sector: bytes_per_sector=%u, sectors_per_cluster=%u",
+                 boot->bytes_per_sector, boot->sectors_per_cluster);
+        return false;
+    }
 
     sector_size_ = boot->bytes_per_sector;
     sectors_per_cluster_ = boot->sectors_per_cluster;
@@ -17,26 +79,88 @@ bool MftParser::parse_boot_sector(SectorReader& reader, uint64_t partition_start
 
     mft_start_sector_ = partition_start + boot->mft_start_cluster * sectors_per_cluster_;
 
+    LOG_FMT(L"[MftParser] Boot sector parsed: sector_size=%u, sectors_per_cluster=%llu, "
+             L"cluster_size=%u, mft_start_cluster=%llu, mft_start_sector=%llu",
+             sector_size_, sectors_per_cluster_, cluster_size_,
+             boot->mft_start_cluster, mft_start_sector_);
+
     if (boot->clusters_per_mft_record > 0) {
         mft_record_size_ = cluster_size_ * boot->clusters_per_mft_record;
     } else {
         mft_record_size_ = 1u << (-boot->clusters_per_mft_record);
     }
+
+    LOG_FMT(L"[MftParser] mft_record_size=%u, clusters_per_mft_record=%d",
+             mft_record_size_, boot->clusters_per_mft_record);
+
+    // Read MFT entry 0 ($MFT) to determine actual MFT size
+    uint32_t sectors_per_record = mft_record_size_ / sector_size_;
+    AlignedBuffer mft_buf(mft_record_size_, sector_size_);
+    if (reader.read_sectors(mft_start_sector_, sectors_per_record, mft_buf)) {
+        uint8_t* raw = mft_buf.data();
+        apply_usa_fixup(raw, mft_record_size_, sector_size_);
+
+        auto* hdr = reinterpret_cast<const MftRecordHeader*>(raw);
+        if (hdr->signature == 0x454C4946) {  // "FILE"
+            uint32_t offset = hdr->attribute_offset;
+            while (offset + sizeof(AttributeHeader) < mft_record_size_) {
+                auto* attr = reinterpret_cast<const AttributeHeader*>(raw + offset);
+                if (attr->type == 0xFFFFFFFF || attr->length == 0) break;
+                if (attr->type == ATTR_DATA && attr->non_resident == 1) {
+                    uint64_t mft_size = *reinterpret_cast<const uint64_t*>(raw + offset + 0x30);
+                    mft_entry_count_ = mft_size / mft_record_size_;
+                    break;
+                }
+                offset += attr->length;
+            }
+        }
+    }
+
+    if (mft_entry_count_ == 0) {
+        // Fallback: limit to 256K entries (256MB of MFT)
+        mft_entry_count_ = 256 * 1024;
+    }
+
+    LOG_FMT(L"[MftParser] MFT entry count: %llu", mft_entry_count_);
+
     return true;
 }
 
 bool MftParser::enumerate_mft(SectorReader& reader,
                               std::function<void(RecoverableFile&&)> callback,
-                              bool include_deleted) {
+                              bool include_deleted,
+                              std::function<bool()> should_stop) {
     uint32_t sectors_per_record = mft_record_size_ / sector_size_;
     AlignedBuffer buf(mft_record_size_, sector_size_);
 
-    for (uint64_t i = 0; ; ++i) {
+    LOG_FMT(L"[MftParser] enumerate_mft: entry_count=%llu, sectors_per_record=%u, mft_start=%llu",
+             mft_entry_count_, sectors_per_record, mft_start_sector_);
+
+    uint64_t file_count = 0;
+    uint64_t dir_count = 0;
+    uint64_t parse_fail_count = 0;
+
+    for (uint64_t i = 0; i < mft_entry_count_; ++i) {
+        if (should_stop && should_stop()) {
+            LOG_FMT(L"[MftParser] Stop requested at entry %llu", i);
+            break;
+        }
         uint64_t sector = mft_start_sector_ + i * sectors_per_record;
-        if (!reader.read_sectors(sector, sectors_per_record, buf)) break;
+        if (!reader.read_sectors(sector, sectors_per_record, buf)) {
+            LOG_FMT(L"[MftParser] read_sectors failed at entry %llu (sector %llu)", i, sector);
+            break;
+        }
+
+        apply_usa_fixup(buf.data(), mft_record_size_, sector_size_);
 
         auto* hdr = reinterpret_cast<const MftRecordHeader*>(buf.data());
         if (hdr->signature != 0x454C4946) continue;  // "FILE"
+
+        // Skip directory entries
+        if (hdr->flags & MFT_FLAG_DIRECTORY) {
+            dir_count++;
+            continue;
+        }
 
         bool is_deleted = !(hdr->flags & MFT_FLAG_IN_USE);
         if (is_deleted && !include_deleted) continue;
@@ -44,10 +168,17 @@ bool MftParser::enumerate_mft(SectorReader& reader,
         RecoverableFile file{};
         file.mft_id = i;
         if (parse_mft_record(buf.data(), mft_record_size_, file, is_deleted)) {
+            file.file_type = detect_file_type(file.file_name);
             file.is_corrupted = is_deleted;
             callback(std::move(file));
+            file_count++;
+        } else {
+            parse_fail_count++;
         }
     }
+
+    LOG_FMT(L"[MftParser] enumerate_mft done: files=%llu, dirs=%llu, parse_fails=%llu",
+             file_count, dir_count, parse_fail_count);
     return true;
 }
 
@@ -61,14 +192,15 @@ bool MftParser::parse_mft_record(const uint8_t* data, uint32_t size,
         if (attr->type == 0xFFFFFFFF || attr->length == 0) break;
 
         if (attr->type == ATTR_FILE_NAME && attr->non_resident == 0) {
-            uint32_t content_offset = offset + 0x18;
-            if (content_offset + 0x42 < offset + attr->length) {
-                const uint8_t* name_ptr = data + content_offset + 0x40;
-                uint8_t name_len = data[content_offset + 0x40 - 2];
-                name_len *= 2;
-                if (content_offset + 0x40 + name_len <= offset + attr->length) {
+            uint16_t content_off = *reinterpret_cast<const uint16_t*>(data + offset + 0x14);
+            uint32_t content_size = *reinterpret_cast<const uint32_t*>(data + offset + 0x10);
+            uint32_t abs_content = offset + content_off;
+            // FILE_NAME content: name_length at +0x40 (1 byte), name at +0x42 (UTF-16LE)
+            if (abs_content + 0x42 <= offset + attr->length && content_size >= 0x42) {
+                uint8_t name_len = data[abs_content + 0x40];
+                if (name_len > 0 && abs_content + 0x42 + name_len * 2 <= offset + attr->length) {
                     file.file_name.assign(
-                        reinterpret_cast<const wchar_t*>(name_ptr), name_len / 2);
+                        reinterpret_cast<const wchar_t*>(data + abs_content + 0x42), name_len);
                 }
             }
         }
@@ -85,7 +217,6 @@ bool MftParser::parse_mft_record(const uint8_t* data, uint32_t size,
     }
 
     if (!file.file_name.empty() && !file.fragments.empty()) {
-        file.file_type = FileType::Unknown;
         return true;
     }
     return false;

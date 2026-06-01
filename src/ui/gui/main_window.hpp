@@ -10,7 +10,7 @@
 #include "resource.h"
 #include "disk-io/disk_info.hpp"
 #include "business/scan_manager.hpp"
-#include "business/recover_manager.hpp"
+#include "business/recovery_manager.hpp"
 #include "business/preview_manager.hpp"
 #include "common/types.hpp"
 
@@ -76,7 +76,7 @@ private:
 
     // Business logic managers
     std::unique_ptr<ScanManager> scanManager_;
-    std::unique_ptr<RecoverManager> recoverManager_;
+    std::unique_ptr<RecoveryManager> recoverManager_;
     std::unique_ptr<business::PreviewManager> previewManager_;
 
     // Disk information cache
@@ -108,6 +108,9 @@ private:
     std::string lastSessionId_;
     std::wstring lastDbPath_;
 
+    // Recovery state tracking
+    bool recovering_ = false;
+
     // Window lifetime tracking for safe PostMessage
     std::shared_ptr<std::atomic<bool>> windowAlive_;
 
@@ -119,6 +122,9 @@ private:
     void OnNotify(LPNMHDR nmhdr);
     void OnScanProgress(const ScanProgress& progress);
     void OnScanComplete();
+    void OnRecoveryProgress(const RecoveryProgress& progress);
+    void OnRecoveryComplete(bool success);
+    void OnRecoveryPaused();
 
     // Control creation helpers
     HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h);

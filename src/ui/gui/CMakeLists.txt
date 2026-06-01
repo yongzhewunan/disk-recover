@@ -5,6 +5,8 @@ add_executable(disk-recover
     main.cpp
     main_window.cpp
     main_window.hpp
+    save_dirs_dialog.cpp
+    save_dirs_dialog.hpp
     resource.h
     resource.rc
 )
@@ -18,6 +20,8 @@ target_link_libraries(disk-recover PRIVATE
     disk_recover_disk_io
     disk_recover_common
     comctl32   # Common controls (ListView, StatusBar, etc.)
+    shell32    # SHBrowseForFolderW
+    ole32      # CoTaskMemFree for SHBrowseForFolder
 )
 
 # Win32 GUI application (no console window)

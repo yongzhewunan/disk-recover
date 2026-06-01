@@ -48,7 +48,7 @@ std::vector<DiskInfo> DiskInfoQuery::EnumeratePhysicalDisks() {
             LOG_MSG(L"[DiskInfo] Failed to query disk geometry");
         }
 
-        if (!QueryPartitionTable(handle, info.partitions)) {
+        if (!QueryPartitionTable(handle, info.geometry.sector_size, info.partitions)) {
             LOG_MSG(L"[DiskInfo] Failed to query partition table");
         }
 
@@ -82,7 +82,7 @@ bool DiskInfoQuery::QueryDiskGeometry(DiskHandle& handle, DiskGeometry& geometry
     return true;
 }
 
-bool DiskInfoQuery::QueryPartitionTable(DiskHandle& handle, std::vector<PartitionInfo>& partitions) {
+bool DiskInfoQuery::QueryPartitionTable(DiskHandle& handle, uint32_t sector_size, std::vector<PartitionInfo>& partitions) {
     DWORD bytes_returned = 0;
     std::vector<uint8_t> buffer(sizeof(DRIVE_LAYOUT_INFORMATION_EX) + 128 * sizeof(PARTITION_INFORMATION_EX));
     if (!DeviceIoControl(handle.native_handle(),
@@ -101,8 +101,8 @@ bool DiskInfoQuery::QueryPartitionTable(DiskHandle& handle, std::vector<Partitio
 
         PartitionInfo pi{};
         pi.index = i;
-        pi.start_sector = src.StartingOffset.QuadPart / 512;
-        pi.sector_count = src.PartitionLength.QuadPart / 512;
+        pi.start_sector = src.StartingOffset.QuadPart / sector_size;
+        pi.sector_count = src.PartitionLength.QuadPart / sector_size;
 
         if (src.PartitionStyle == PARTITION_STYLE_MBR) {
             pi.type_id = src.Mbr.PartitionType;
@@ -214,6 +214,86 @@ std::wstring DiskInfoQuery::QueryDiskModel(DiskHandle& handle) {
         return std::wstring(model, model + len);
     }
     return L"Unknown";
+}
+
+std::vector<wchar_t> DiskInfoQuery::GetDriveLettersForPhysicalDrive(const std::wstring& physical_drive_path) {
+    // Structures for IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+    typedef struct _DISK_EXTENT {
+        ULONG DiskNumber;
+        LARGE_INTEGER StartingOffset;
+        LARGE_INTEGER ExtentLength;
+    } DISK_EXTENT;
+
+    typedef struct _VOLUME_DISK_EXTENTS {
+        ULONG NumberOfDiskExtents;
+        DISK_EXTENT Extents[1];
+    } VOLUME_DISK_EXTENTS;
+
+#define IOCTL_VOLUME_BASE 0x00000056
+#define IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS CTL_CODE(IOCTL_VOLUME_BASE, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+    std::vector<wchar_t> result;
+
+    // Parse the physical drive number from the path (e.g., \\.\PhysicalDrive0 -> 0)
+    const std::wstring prefix = L"PhysicalDrive";
+    size_t pos = physical_drive_path.find(prefix);
+    if (pos == std::wstring::npos) {
+        return result;
+    }
+
+    int drive_number = 0;
+    try {
+        drive_number = std::stoi(physical_drive_path.substr(pos + prefix.length()));
+    } catch (...) {
+        return result;
+    }
+
+    // Iterate over all possible drive letters A-Z
+    for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
+        std::wstring volume_path = L"\\\\.\\" + std::wstring(1, letter) + L":";
+
+        HANDLE hVol = CreateFileW(
+            volume_path.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+
+        if (hVol == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        // Allocate buffer large enough for multiple extents
+        DWORD buffer_size = sizeof(VOLUME_DISK_EXTENTS) + 31 * sizeof(DISK_EXTENT);
+        std::vector<uint8_t> buffer(buffer_size);
+        DWORD bytes_returned = 0;
+
+        BOOL ok = DeviceIoControl(
+            hVol,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            nullptr, 0,
+            buffer.data(), buffer_size,
+            &bytes_returned,
+            nullptr);
+
+        CloseHandle(hVol);
+
+        if (!ok) {
+            continue;
+        }
+
+        auto* extents = reinterpret_cast<VOLUME_DISK_EXTENTS*>(buffer.data());
+        for (ULONG i = 0; i < extents->NumberOfDiskExtents; ++i) {
+            if (extents->Extents[i].DiskNumber == static_cast<ULONG>(drive_number)) {
+                result.push_back(letter);
+                break;
+            }
+        }
+    }
+
+    return result;
 }
 
 } // namespace disk_recover

@@ -1,15 +1,51 @@
-#include "fat_parser.hpp"
+﻿#include "fat_parser.hpp"
+#include "../../common/logger.hpp"
 #include <cstring>
+#include <algorithm>
 
 namespace disk_recover::fat {
+
+FileType FatParser::detect_file_type(const std::wstring& filename) {
+    size_t dot = filename.rfind(L'.');
+    if (dot == std::wstring::npos || dot + 1 >= filename.size()) return FileType::Unknown;
+
+    std::wstring ext = filename.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+    static const wchar_t* image_exts[] = {
+        L"jpg", L"jpeg", L"png", L"gif", L"bmp", L"tiff", L"tif",
+        L"cr2", L"nef", L"arw", L"dng", L"webp", L"ico", L"heic",
+        L"raw", L"psd", L"svg", L"jfif"
+    };
+    static const wchar_t* video_exts[] = {
+        L"mp4", L"mov", L"avi", L"mkv", L"webm", L"flv",
+        L"wmv", L"m4v", L"3gp", L"mts", L"m2ts", L"vob",
+        L"asf", L"rm", L"rmvb"
+    };
+
+    for (const auto* e : image_exts) {
+        if (ext == e) return FileType::Image;
+    }
+    for (const auto* e : video_exts) {
+        if (ext == e) return FileType::Video;
+    }
+    return FileType::Unknown;
+}
 
 bool FatParser::parse_boot_sector(SectorReader& reader, uint64_t partition_start) {
     partition_start_ = partition_start;
     AlignedBuffer buf(reader.sector_size(), reader.sector_size());
-    if (!reader.read_sectors(partition_start, 1, buf)) return false;
+    if (!reader.read_sectors(partition_start, 1, buf)) {
+        LOG_FMT(L"[FatParser] Failed to read boot sector at %llu", partition_start);
+        return false;
+    }
 
     auto* boot = reinterpret_cast<const FatBootSector*>(buf.data());
-    if (boot->bytes_per_sector == 0 || boot->sectors_per_cluster == 0) return false;
+    if (boot->bytes_per_sector == 0 || boot->sectors_per_cluster == 0) {
+        LOG_FMT(L"[FatParser] Invalid boot: bytes_per_sector=%u, sectors_per_cluster=%u",
+                 boot->bytes_per_sector, boot->sectors_per_cluster);
+        return false;
+    }
 
     bytes_per_sector_ = boot->bytes_per_sector;
     sectors_per_cluster_ = boot->sectors_per_cluster;
@@ -44,6 +80,13 @@ bool FatParser::parse_boot_sector(SectorReader& reader, uint64_t partition_start
     if (fat_type_ == FatType::Fat32) {
         root_dir_sector_ = cluster_to_sector(root_cluster_);
     }
+
+    LOG_FMT(L"[FatParser] Parsed: type=%d, bytes_per_sector=%u, sectors_per_cluster=%u, "
+             L"reserved=%u, fat_count=%u, sectors_per_fat=%u, root_cluster=%u, "
+             L"root_dir_sector=%u, data_start=%u, total_clusters=%u",
+             static_cast<int>(fat_type_), bytes_per_sector_, sectors_per_cluster_,
+             reserved_sectors_, fat_count_, sectors_per_fat_, root_cluster_,
+             root_dir_sector_, data_start_sector_, total_clusters_);
 
     return true;
 }
@@ -125,73 +168,225 @@ bool FatParser::read_cluster_chain(SectorReader& reader, uint32_t start_cluster,
 
 bool FatParser::enumerate_root_dir(SectorReader& reader,
                                    std::function<void(RecoverableFile&&)> callback,
-                                   bool include_deleted) {
-    uint32_t dir_sector = root_dir_sector_;
-    uint32_t dir_sectors;
-
+                                   bool include_deleted,
+                                   std::function<bool()> should_stop) {
     if (fat_type_ == FatType::Fat32) {
-        std::vector<DiskExtent> extents;
-        if (!read_cluster_chain(reader, root_cluster_, extents)) return false;
-        dir_sectors = 0;
-        for (auto& ext : extents) dir_sectors += static_cast<uint32_t>(ext.sector_count);
-    } else {
-        dir_sectors = root_dir_sectors_;
+        return enumerate_directory(reader, root_cluster_, callback, include_deleted, 0, should_stop);
     }
+
+    // FAT12/16: root directory is at fixed sectors, not in cluster chain
+    uint32_t dir_sector = root_dir_sector_;
+    uint32_t dir_sectors = root_dir_sectors_;
 
     AlignedBuffer buf(dir_sectors * bytes_per_sector_, bytes_per_sector_);
-
-    if (fat_type_ == FatType::Fat32) {
-        std::vector<DiskExtent> extents;
-        read_cluster_chain(reader, root_cluster_, extents);
-        uint64_t offset = 0;
-        for (auto& ext : extents) {
-            AlignedBuffer ext_buf(static_cast<size_t>(ext.sector_count) * bytes_per_sector_, bytes_per_sector_);
-            if (!reader.read_sectors(ext.start_sector, static_cast<uint32_t>(ext.sector_count), ext_buf)) break;
-            memcpy(buf.data() + offset, ext_buf.data(), static_cast<size_t>(ext.sector_count) * bytes_per_sector_);
-            offset += ext.sector_count * bytes_per_sector_;
-        }
-    } else {
-        if (!reader.read_sectors(dir_sector, dir_sectors, buf)) return false;
-    }
+    if (!reader.read_sectors(dir_sector, dir_sectors, buf)) return false;
 
     auto* entries = reinterpret_cast<const uint8_t*>(buf.data());
     uint32_t entry_count = (dir_sectors * bytes_per_sector_) / 32;
 
+    // LFN assembly state
+    std::wstring lfn_name;
+    bool lfn_valid = false;
+
     for (uint32_t i = 0; i < entry_count; ++i) {
         auto* entry = entries + i * 32;
         if (entry[0] == 0x00) break;
+
+        // LFN entry
+        if (entry[11] == 0x0F) {
+            uint8_t seq = entry[0] & 0x3F;
+            if (seq == 0) { lfn_valid = false; continue; }
+
+            // Extract up to 13 wchar_t from LFN entry
+            wchar_t lfn_part[13];
+            int pos = 0;
+            const uint8_t* name_offsets[] = {entry+1, entry+3, entry+5, entry+7, entry+9,
+                                              entry+14, entry+16, entry+18, entry+20, entry+22,
+                                              entry+24, entry+28, entry+30};
+            for (int k = 0; k < 13; ++k) {
+                uint16_t ch = *reinterpret_cast<const uint16_t*>(name_offsets[k]);
+                if (ch == 0x0000 || ch == 0xFFFF) break;
+                lfn_part[pos++] = static_cast<wchar_t>(ch);
+            }
+
+            if (seq == 1) {
+                // Last LFN entry (stored first) — start of name
+                lfn_name.assign(lfn_part, pos);
+                lfn_valid = true;
+            } else if (lfn_valid) {
+                // Prepend this part
+                lfn_name = std::wstring(lfn_part, pos) + lfn_name;
+            }
+            continue;
+        }
+
         if (entry[0] == 0xE5) {
+            lfn_valid = false;
+            lfn_name.clear();
             if (!include_deleted) continue;
         }
-        if (entry[11] == 0x0F) continue;  // LFN entry
 
-        RecoverableFile file{};
-        file.is_corrupted = (entry[0] == 0xE5);
-
-        char name[13] = {};
-        memcpy(name, entry, 8);
-        int pos = 8;
-        while (pos > 0 && name[pos-1] == ' ') pos--;
-        if (entry[8] != ' ') {
-            name[pos++] = '.';
-            memcpy(name + pos, entry + 8, 3);
-            pos += 3;
+        // Regular entry — build name
+        std::wstring file_name;
+        if (lfn_valid && !lfn_name.empty()) {
+            file_name = lfn_name;
+        } else {
+            char name[13] = {};
+            memcpy(name, entry, 8);
+            int pos = 8;
+            while (pos > 0 && name[pos-1] == ' ') pos--;
+            if (entry[8] != ' ') {
+                name[pos++] = '.';
+                memcpy(name + pos, entry + 8, 3);
+                pos += 3;
+            }
+            while (pos > 0 && name[pos-1] == ' ') pos--;
+            name[pos] = '\0';
+            wchar_t wname[13];
+            for (int j = 0; j <= pos; ++j) wname[j] = static_cast<wchar_t>(name[j]);
+            file_name = wname;
         }
-        while (pos > 0 && name[pos-1] == ' ') pos--;
-        name[pos] = '\0';
-
-        wchar_t wname[13];
-        for (int j = 0; j <= pos; ++j) wname[j] = static_cast<wchar_t>(name[j]);
-        file.file_name = wname;
+        lfn_valid = false;
+        lfn_name.clear();
 
         uint16_t cluster_hi = *reinterpret_cast<const uint16_t*>(entry + 20);
         uint16_t cluster_lo = *reinterpret_cast<const uint16_t*>(entry + 26);
         uint32_t cluster = (cluster_hi << 16) | cluster_lo;
+        uint8_t attr = entry[11];
+        uint32_t file_size = *reinterpret_cast<const uint32_t*>(entry + 28);
 
-        file.file_size = *reinterpret_cast<const uint32_t*>(entry + 28);
-        file.file_type = FileType::Unknown;
+        // Directory — recurse into it
+        if ((attr & 0x10) && cluster >= 2 && !(attr & 0x08)) {
+            // Skip . and .. entries
+            if (file_name == L"." || file_name == L"..") continue;
+            enumerate_directory(reader, cluster, callback, include_deleted, 1, should_stop);
+            continue;
+        }
 
-        if (cluster >= 2 && file.file_size > 0) {
+        // Regular file
+        if (cluster >= 2 && file_size > 0) {
+            RecoverableFile file{};
+            file.file_name = file_name;
+            file.is_corrupted = (entry[0] == 0xE5);
+            file.file_size = file_size;
+            file.file_type = detect_file_type(file.file_name);
+            read_cluster_chain(reader, cluster, file.fragments);
+            callback(std::move(file));
+        }
+    }
+    return true;
+}
+
+bool FatParser::enumerate_directory(SectorReader& reader, uint32_t start_cluster,
+                                   const std::function<void(RecoverableFile&&)>& callback,
+                                   bool include_deleted, int depth,
+                                   const std::function<bool()>& should_stop) {
+    if (depth > 10) return true;  // Max recursion depth
+
+    std::vector<DiskExtent> extents;
+    if (!read_cluster_chain(reader, start_cluster, extents)) return true;
+
+    // Read all clusters into a contiguous buffer
+    uint32_t dir_sectors = 0;
+    for (auto& ext : extents) dir_sectors += static_cast<uint32_t>(ext.sector_count);
+
+    uint32_t dir_bytes = dir_sectors * bytes_per_sector_;
+    AlignedBuffer buf(dir_bytes, bytes_per_sector_);
+    uint64_t offset = 0;
+    for (auto& ext : extents) {
+        AlignedBuffer ext_buf(static_cast<size_t>(ext.sector_count) * bytes_per_sector_, bytes_per_sector_);
+        if (!reader.read_sectors(ext.start_sector, static_cast<uint32_t>(ext.sector_count), ext_buf)) break;
+        memcpy(buf.data() + offset, ext_buf.data(), static_cast<size_t>(ext.sector_count) * bytes_per_sector_);
+        offset += ext.sector_count * bytes_per_sector_;
+    }
+
+    auto* entries = reinterpret_cast<const uint8_t*>(buf.data());
+    uint32_t entry_count = dir_bytes / 32;
+
+    // LFN assembly state
+    std::wstring lfn_name;
+    bool lfn_valid = false;
+
+    for (uint32_t i = 0; i < entry_count; ++i) {
+        auto* entry = entries + i * 32;
+        if (entry[0] == 0x00) break;
+
+        // LFN entry
+        if (entry[11] == 0x0F) {
+            uint8_t seq = entry[0] & 0x3F;
+            if (seq == 0) { lfn_valid = false; continue; }
+
+            wchar_t lfn_part[13];
+            int pos = 0;
+            const uint8_t* name_offsets[] = {entry+1, entry+3, entry+5, entry+7, entry+9,
+                                              entry+14, entry+16, entry+18, entry+20, entry+22,
+                                              entry+24, entry+28, entry+30};
+            for (int k = 0; k < 13; ++k) {
+                uint16_t ch = *reinterpret_cast<const uint16_t*>(name_offsets[k]);
+                if (ch == 0x0000 || ch == 0xFFFF) break;
+                lfn_part[pos++] = static_cast<wchar_t>(ch);
+            }
+
+            if (seq == 1) {
+                lfn_name.assign(lfn_part, pos);
+                lfn_valid = true;
+            } else if (lfn_valid) {
+                lfn_name = std::wstring(lfn_part, pos) + lfn_name;
+            }
+            continue;
+        }
+
+        if (entry[0] == 0xE5) {
+            lfn_valid = false;
+            lfn_name.clear();
+            if (!include_deleted) continue;
+        }
+
+        // Build name
+        std::wstring file_name;
+        if (lfn_valid && !lfn_name.empty()) {
+            file_name = lfn_name;
+        } else {
+            char name[13] = {};
+            memcpy(name, entry, 8);
+            int pos = 8;
+            while (pos > 0 && name[pos-1] == ' ') pos--;
+            if (entry[8] != ' ') {
+                name[pos++] = '.';
+                memcpy(name + pos, entry + 8, 3);
+                pos += 3;
+            }
+            while (pos > 0 && name[pos-1] == ' ') pos--;
+            name[pos] = '\0';
+            wchar_t wname[13];
+            for (int j = 0; j <= pos; ++j) wname[j] = static_cast<wchar_t>(name[j]);
+            file_name = wname;
+        }
+        lfn_valid = false;
+        lfn_name.clear();
+
+        uint16_t cluster_hi = *reinterpret_cast<const uint16_t*>(entry + 20);
+        uint16_t cluster_lo = *reinterpret_cast<const uint16_t*>(entry + 26);
+        uint32_t cluster = (cluster_hi << 16) | cluster_lo;
+        uint8_t attr = entry[11];
+        uint32_t file_size = *reinterpret_cast<const uint32_t*>(entry + 28);
+
+        // Skip . and .. entries
+        if (file_name == L"." || file_name == L"..") continue;
+
+        // Directory — recurse
+        if ((attr & 0x10) && cluster >= 2 && !(attr & 0x08)) {
+            enumerate_directory(reader, cluster, callback, include_deleted, depth + 1, should_stop);
+            continue;
+        }
+
+        // Regular file
+        if (cluster >= 2 && file_size > 0) {
+            RecoverableFile file{};
+            file.file_name = file_name;
+            file.is_corrupted = (entry[0] == 0xE5);
+            file.file_size = file_size;
+            file.file_type = detect_file_type(file.file_name);
             read_cluster_chain(reader, cluster, file.fragments);
             callback(std::move(file));
         }

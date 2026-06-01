@@ -11,7 +11,10 @@
 #include "disk-io/disk_handle.hpp"
 #include "disk-io/sector_reader.hpp"
 #include "disk-io/aligned_buffer.hpp"
+#include "disk-io/disk_info.hpp"
 #include "business/multi_target_writer.hpp"
+#include "business/scan_cache_db.hpp"
+#include "save_dirs_dialog.hpp"
 #include "common/logger.hpp"
 
 // For admin check
@@ -203,6 +206,24 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             self->OnScanComplete();
             return 0;
 
+        case WM_RECOVERY_PROGRESS:
+            if (lParam) {
+                auto progressPtr = std::unique_ptr<RecoveryProgress>(
+                    reinterpret_cast<RecoveryProgress*>(lParam));
+                if (self->hwnd_) {
+                    self->OnRecoveryProgress(*progressPtr);
+                }
+            }
+            return 0;
+
+        case WM_RECOVERY_COMPLETE:
+            self->OnRecoveryComplete(wParam == 0);
+            return 0;
+
+        case WM_RECOVERY_PAUSED:
+            self->OnRecoveryPaused();
+            return 0;
+
         default:
             return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
@@ -218,7 +239,7 @@ void MainWindow::OnCreate() {
 
     // Initialize business logic managers
     scanManager_ = std::make_unique<ScanManager>();
-    recoverManager_ = std::make_unique<RecoverManager>();
+    recoverManager_ = std::make_unique<RecoveryManager>();
     previewManager_ = std::make_unique<business::PreviewManager>();
 
     LOG_MSG(L"[MainWindow] Business managers initialized");
@@ -530,6 +551,56 @@ void MainWindow::OnScanComplete() {
         _snwprintf_s(status, _TRUNCATE, L"Scan complete. %zu files found.", foundFiles_.size());
     }
     UpdateStatus(status);
+}
+
+void MainWindow::OnRecoveryProgress(const RecoveryProgress& progress) {
+    auto stats = recoverManager_->stats();
+    if (stats.total_files > 0) {
+        int percent = static_cast<int>((stats.files_recovered * 100) / stats.total_files);
+        UpdateProgress(percent);
+    }
+
+    wchar_t status[256];
+    _snwprintf_s(status, _TRUNCATE,
+                 L"Recovering... %llu / %llu files (%llu failed)",
+                 stats.files_recovered, stats.total_files, stats.files_failed);
+    UpdateStatus(status);
+}
+
+void MainWindow::OnRecoveryComplete(bool success) {
+    auto stats = recoverManager_->stats();
+
+    EnableWindow(hRecoverBtn_, TRUE);
+    EnableWindow(hScanBtn_, TRUE);
+
+    wchar_t msg[512];
+    if (success && stats.files_failed == 0) {
+        _snwprintf_s(msg, _TRUNCATE,
+                     L"Recovery complete!\n\n"
+                     L"Total files: %llu\n"
+                     L"Recovered: %llu\n"
+                     L"Bytes recovered: %s",
+                     stats.total_files, stats.files_recovered,
+                     FormatSize(stats.bytes_recovered).c_str());
+        MessageBoxW(hwnd_, msg, L"Recovery Complete", MB_OK | MB_ICONINFORMATION);
+        UpdateStatus(L"Recovery complete.");
+    } else {
+        _snwprintf_s(msg, _TRUNCATE,
+                     L"Recovery %s\n\n"
+                     L"Total files: %llu\n"
+                     L"Recovered: %llu\n"
+                     L"Failed: %llu\n"
+                     L"Bytes recovered: %s",
+                     success ? L"partially completed." : L"failed.",
+                     stats.total_files, stats.files_recovered, stats.files_failed,
+                     FormatSize(stats.bytes_recovered).c_str());
+        MessageBoxW(hwnd_, msg, L"Recovery", MB_OK | MB_ICONWARNING);
+        UpdateStatus(L"Recovery completed with errors.");
+    }
+}
+
+void MainWindow::OnRecoveryPaused() {
+    UpdateStatus(L"Recovery paused - no disk space. Free space or add more directories, then resume.");
 }
 
 HWND MainWindow::CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
@@ -984,6 +1055,21 @@ void MainWindow::StartScan() {
 }
 
 void MainWindow::StopScan() {
+    // Stop recovery if active
+    if (recovering_ && recoverManager_) {
+        LOG_MSG(L"[MainWindow] Stop recovery requested");
+        if (recoverManager_->is_paused()) {
+            recoverManager_->resume_recovery();
+        }
+        recoverManager_->stop_recovery();
+        recovering_ = false;
+        SetWindowTextW(hPauseBtn_, L"暂停");
+        UpdateStatus(L"恢复已停止。");
+        EnableWindow(hRecoverBtn_, !foundFiles_.empty());
+        return;
+    }
+
+    // Stop scan
     if (!scanManager_ || !scanManager_->is_scanning()) return;
 
     LOG_MSG(L"[MainWindow] Stop scan requested");
@@ -993,59 +1079,90 @@ void MainWindow::StopScan() {
         scanManager_->resume_from_pause();
     }
 
-    // stop_scan() sets the flag and waits for the scan thread to finish
     scanManager_->stop_scan();
-
-    // Reset pause button text
     SetWindowTextW(hPauseBtn_, L"暂停");
-
     UpdateStatus(L"扫描已停止。");
 }
 
 void MainWindow::TogglePause() {
-    if (!scanManager_ || !scanManager_->is_scanning()) return;
+    // Recovery pause/resume
+    if (recovering_) {
+        if (recoverManager_->is_paused()) {
+            recoverManager_->resume_recovery();
+            SetWindowTextW(hPauseBtn_, L"暂停");
+            UpdateStatus(L"恢复中...");
+        } else {
+            recoverManager_->pause_recovery();
+            SetWindowTextW(hPauseBtn_, L"继续");
+            UpdateStatus(L"恢复已暂停。");
+        }
+        return;
+    }
 
-    if (scanManager_->is_paused()) {
-        scanManager_->resume_from_pause();
-        SetWindowTextW(hPauseBtn_, L"暂停");
-        UpdateStatus(L"扫描中...");
-        LOG_MSG(L"[MainWindow] Scan resumed from pause");
-    } else {
-        scanManager_->pause_scan();
-        SetWindowTextW(hPauseBtn_, L"继续");
-        UpdateStatus(L"扫描已暂停。");
-        LOG_MSG(L"[MainWindow] Scan paused");
+    // Scan pause/resume
+    if (scanManager_ && scanManager_->is_scanning()) {
+        if (scanManager_->is_paused()) {
+            scanManager_->resume_from_pause();
+            SetWindowTextW(hPauseBtn_, L"暂停");
+            UpdateStatus(L"扫描中...");
+            LOG_MSG(L"[MainWindow] Scan resumed from pause");
+        } else {
+            scanManager_->pause_scan();
+            SetWindowTextW(hPauseBtn_, L"继续");
+            UpdateStatus(L"扫描已暂停。");
+            LOG_MSG(L"[MainWindow] Scan paused");
+        }
     }
 }
 
 void MainWindow::StartRecovery() {
     if (foundFiles_.empty()) {
-        MessageBoxW(hwnd_, L"No files to recover.", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd_, L"没有可恢复的文件。请先扫描磁盘。", L"提示", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
-    // Get selected files from ListView
-    // For simplicity, recover all files (could add multi-select support)
-    std::vector<RecoverableFile> selectedFiles;
-
-    int idx = -1;
-    while ((idx = ListView_GetNextItem(hFileList_, idx, LVNI_SELECTED)) != -1) {
-        LVITEMW item = {};
-        item.mask = LVIF_PARAM;
-        item.iItem = idx;
-        ListView_GetItem(hFileList_, &item);
-
-        // Defensive bounds check - lParam could be invalid if list is corrupted
-        if (item.lParam < 0) continue;
-        size_t fileIdx = static_cast<size_t>(item.lParam);
-        if (fileIdx >= foundFiles_.size()) continue;
-
-        selectedFiles.push_back(foundFiles_[fileIdx]);
+    // Get source disk drive letters to exclude
+    const DiskInfo* disk = GetSelectedDisk();
+    std::vector<wchar_t> excludedLetters;
+    if (disk) {
+        excludedLetters = DiskInfoQuery::GetDriveLettersForPhysicalDrive(disk->device_path);
     }
 
-    if (selectedFiles.empty()) {
-        // If nothing selected, recover all
-        selectedFiles = foundFiles_;
+    // Show multi-directory selection dialog
+    std::vector<SaveDirEntry> saveDirs;
+    if (!SaveDirsDialog::Show(hwnd_, excludedLetters, saveDirs)) {
+        return;  // User cancelled or no directories selected
+    }
+
+    LOG_FMT(L"[MainWindow] Recovery: %zu save directories selected", saveDirs.size());
+
+    // Build recovery config
+    RecoveryConfig config;
+    config.save_dirs = std::move(saveDirs);
+    config.session_id = lastSessionId_;
+    config.db_path = lastDbPath_;
+    config.hwnd = hwnd_;
+    config.min_free_bytes = 1ULL << 30;  // 1 GB
+
+    // Start async recovery
+    if (!recoverManager_->start_recovery(config)) {
+        MessageBoxW(hwnd_, L"无法启动恢复。", L"错误", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    recovering_ = true;
+    SetWindowTextW(hPauseBtn_, L"暂停");
+    EnableWindow(hScanBtn_, FALSE);
+    EnableWindow(hRecoverBtn_, FALSE);
+    EnableWindow(hPauseBtn_, TRUE);
+    EnableWindow(hStopBtn_, TRUE);
+    EnableWindow(hDiskList_, FALSE);
+    EnableWindow(hPartitionList_, FALSE);
+    UpdateStatus(L"恢复中...");
+}
+    if (recoverManager_->is_recovering()) {
+        MessageBoxW(hwnd_, L"Recovery is already in progress.", L"Info", MB_OK | MB_ICONINFORMATION);
+        return;
     }
 
     // Browse for output folder
@@ -1065,70 +1182,36 @@ void MainWindow::StartRecovery() {
     SHGetPathFromIDListW(pidl, outputPath);
     CoTaskMemFree(pidl);
 
-    // Get the selected disk for SectorReader
+    // Get the selected disk for reading
     const DiskInfo* disk = GetSelectedDisk();
     if (!disk) {
         MessageBoxW(hwnd_, L"No disk selected.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
 
-    // Open the disk for reading
-    DiskHandle diskHandle;
-    if (!diskHandle.open(disk->device_path)) {
-        MessageBoxW(hwnd_, L"Failed to open disk for reading.", L"Error", MB_OK | MB_ICONERROR);
-        return;
-    }
+    // Build RecoveryConfig
+    RecoveryConfig config;
+    config.session_id = lastSessionId_;
+    config.db_path = lastDbPath_;
+    config.source_disk_path = disk->device_path;
+    config.sector_size = disk->geometry.sector_size;
+    config.hwnd = hwnd_;
+    config.min_free_bytes = 1ULL << 30;  // 1 GB
 
-    // Create SectorReader
-    SectorReader sectorReader(diskHandle, disk->geometry.sector_size);
+    SaveDirEntry dir_entry;
+    dir_entry.path = outputPath;
+    config.save_dirs.push_back(dir_entry);
 
-    // Create MultiTargetWriter with output path
-    MultiTargetWriter writer;
-    writer.add_target(outputPath);
-    writer.set_auto_switch(true);
-
-    // Set progress callback
-    recoverManager_->set_progress_callback([this](uint32_t current, uint32_t total) {
-        if (total > 0) {
-            int percent = static_cast<int>((current * 100) / total);
-            PostMessageW(hwnd_, WM_SCAN_PROGRESS, percent, 0);
-        }
-    });
-
-    // Perform recovery
+    // Perform recovery (async)
     UpdateStatus(L"Starting recovery...");
     EnableWindow(hRecoverBtn_, FALSE);
     EnableWindow(hScanBtn_, FALSE);
 
-    bool success = recoverManager_->start_recovery(sectorReader, selectedFiles, writer);
-    const auto& report = recoverManager_->report();
-
-    // Show result
-    wchar_t msg[512];
-    if (success) {
-        _snwprintf_s(msg, _TRUNCATE,
-                     L"Recovery complete!\n\n"
-                     L"Total files: %u\n"
-                     L"Recovered: %u\n"
-                     L"Failed: %u\n"
-                     L"Bytes recovered: %s",
-                     report.total_files, report.success_count, report.failed_count,
-                     FormatSize(report.total_bytes_recovered).c_str());
-        MessageBoxW(hwnd_, msg, L"Recovery Complete", MB_OK | MB_ICONINFORMATION);
-        UpdateStatus(L"Recovery complete.");
-    } else {
-        _snwprintf_s(msg, _TRUNCATE,
-                     L"Recovery partially completed.\n\n"
-                     L"Total files: %u\n"
-                     L"Recovered: %u\n"
-                     L"Failed: %u",
-                     report.total_files, report.success_count, report.failed_count);
-        MessageBoxW(hwnd_, msg, L"Recovery", MB_OK | MB_ICONWARNING);
-        UpdateStatus(L"Recovery completed with errors.");
+    if (!recoverManager_->start_recovery(config)) {
+        MessageBoxW(hwnd_, L"Failed to start recovery.", L"Error", MB_OK | MB_ICONERROR);
+        EnableWindow(hRecoverBtn_, TRUE);
+        EnableWindow(hScanBtn_, TRUE);
     }
-
-    EnableWindow(hRecoverBtn_, TRUE);
-    EnableWindow(hScanBtn_, TRUE);
 }
 
 void MainWindow::UpdatePreview(int selectedIndex) {

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 
 namespace disk_recover::ntfs {
@@ -15,12 +15,17 @@ struct NtfsBootSector {
     uint16_t unused1;
     uint8_t  media_descriptor;
     uint16_t unused2;
-    uint8_t  reserved2[20];
+    uint16_t sectors_per_track;
+    uint16_t num_heads;
+    uint32_t hidden_sectors;
+    uint32_t hidden_sectors_high;
+    uint32_t unused3;
     uint64_t total_sectors;
     uint64_t mft_start_cluster;
     uint64_t mft_mirror_cluster;
     int8_t   clusters_per_mft_record;
     int8_t   clusters_per_index_record;
+    uint8_t  reserved2[2];
     uint64_t volume_serial_number;
     uint32_t checksum;
 };

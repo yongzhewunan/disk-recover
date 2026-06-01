@@ -141,6 +141,16 @@ bool ScanCacheDB::ensure_tables() {
 
         CREATE INDEX IF NOT EXISTS idx_bad_sectors_session
             ON bad_sectors(session_id);
+
+        CREATE TABLE IF NOT EXISTS recovery_progress (
+            session_id TEXT PRIMARY KEY,
+            last_file_index INTEGER NOT NULL,
+            save_dirs TEXT NOT NULL,
+            files_recovered INTEGER NOT NULL,
+            bytes_recovered INTEGER NOT NULL,
+            is_paused INTEGER NOT NULL DEFAULT 0,
+            ext_counters TEXT NOT NULL DEFAULT '{}'
+        );
     )";
 
     char* errmsg = nullptr;
@@ -506,6 +516,82 @@ std::unordered_set<uint64_t> ScanCacheDB::load_file_keys(const std::string& sess
     }
 
     return keys;
+}
+
+bool ScanCacheDB::save_recovery_progress(const RecoveryProgress& progress) {
+    const char* sql = R"(
+        INSERT OR REPLACE INTO recovery_progress
+            (session_id, last_file_index, save_dirs, files_recovered,
+             bytes_recovered, is_paused, ext_counters)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, progress.session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, progress.last_file_index);
+    sqlite3_bind_text(stmt, 3, progress.save_dirs_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(progress.files_recovered));
+    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(progress.bytes_recovered));
+    sqlite3_bind_int(stmt, 6, progress.is_paused ? 1 : 0);
+    sqlite3_bind_text(stmt, 7, progress.ext_counters_json.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE;
+}
+
+bool ScanCacheDB::load_recovery_progress(const std::string& session_id, RecoveryProgress& progress) {
+    const char* sql = R"(
+        SELECT last_file_index, save_dirs, files_recovered,
+               bytes_recovered, is_paused, ext_counters
+        FROM recovery_progress
+        WHERE session_id = ?
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        found = true;
+        progress.session_id = session_id;
+        progress.last_file_index = sqlite3_column_int(stmt, 0);
+
+        const char* save_dirs = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        progress.save_dirs_json = save_dirs ? save_dirs : "";
+
+        progress.files_recovered = static_cast<uint64_t>(sqlite3_column_int64(stmt, 2));
+        progress.bytes_recovered = static_cast<uint64_t>(sqlite3_column_int64(stmt, 3));
+        progress.is_paused = sqlite3_column_int(stmt, 4) != 0;
+
+        const char* ext_counters = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        progress.ext_counters_json = ext_counters ? ext_counters : "{}";
+    }
+
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool ScanCacheDB::clear_recovery_progress(const std::string& session_id) {
+    const char* sql = "DELETE FROM recovery_progress WHERE session_id = ?";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return false;
+
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE;
 }
 
 } // namespace disk_recover

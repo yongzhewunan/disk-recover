@@ -19,7 +19,8 @@ public:
 
     bool enumerate_root_dir(SectorReader& reader,
                            std::function<void(RecoverableFile&&)> callback,
-                           bool include_deleted = true);
+                           bool include_deleted = true,
+                           std::function<bool()> should_stop = {});
 
     bool read_cluster_chain(SectorReader& reader, uint32_t start_cluster,
                            std::vector<DiskExtent>& extents);
@@ -29,6 +30,11 @@ private:
     uint32_t cluster_to_sector(uint32_t cluster) const;
     bool is_end_of_chain(uint32_t entry) const;
     bool is_bad_cluster(uint32_t entry) const;
+    static FileType detect_file_type(const std::wstring& filename);
+    bool enumerate_directory(SectorReader& reader, uint32_t start_cluster,
+                             const std::function<void(RecoverableFile&&)>& callback,
+                             bool include_deleted, int depth,
+                             const std::function<bool()>& should_stop);
 
     FatType fat_type_ = FatType::Unknown;
     uint64_t partition_start_ = 0;
