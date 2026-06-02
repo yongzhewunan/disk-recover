@@ -1,4 +1,5 @@
 ﻿#define NOMINMAX
+#include <windows.h>
 #include <CLI/CLI.hpp>
 #include "disk-io/disk_handle.hpp"
 #include "disk-io/disk_info.hpp"
@@ -10,6 +11,7 @@
 #include "business/scan_cache_db.hpp"
 #include "business/preview_manager.hpp"
 #include "common/utils.hpp"
+#include "common/logger.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -136,31 +138,99 @@ static bool SaveThumbnailToFile(HBITMAP thumbnail, const std::wstring& output_pa
 }
 
 int main(int argc, char** argv) {
+    // Set console output to UTF-8 for proper Chinese character display
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    // Initialize logger
+    LOG_INIT();
+
     CLI::App app{"Disk Recover - 磁盘数据恢复工具", "disk-recover"};
 
     // list-disks
     auto list_cmd = app.add_subcommand("list-disks", "列出所有可用磁盘和分区");
     list_cmd->callback([]() {
-        if (!utils::IsAdminPrivilege()) {
-            std::cerr << "警告: 未以管理员权限运行，磁盘访问可能受限\n";
+        bool is_admin = utils::IsAdminPrivilege();
+
+        if (!is_admin) {
+            std::cerr << "\n警告: 未以管理员权限运行\n";
+            std::cerr << "提示: 请右键点击终端，选择\"以管理员身份运行\"，然后重新执行此命令\n\n";
+        } else {
+            std::cout << "已检测到管理员权限\n\n";
         }
+
+        // Always show logical drives first
+        std::cout << "=== 逻辑驱动器 ===\n\n";
+
+        DWORD drives = GetLogicalDrives();
+        if (drives == 0) {
+            std::cerr << "错误: 无法获取逻辑驱动器信息\n";
+        } else {
+            std::cout << "驱动器\t类型\t大小\n";
+            std::cout << "------\t----\t----\n";
+
+            for (wchar_t letter = L'A'; letter <= L'Z'; ++letter) {
+                if (!(drives & (1 << (letter - L'A')))) continue;
+
+                std::wstring root_path = letter + std::wstring(L":\\");
+                UINT drive_type = GetDriveTypeW(root_path.c_str());
+
+                std::string type_str;
+                switch (drive_type) {
+                    case DRIVE_FIXED: type_str = "固定"; break;
+                    case DRIVE_REMOVABLE: type_str = "可移动"; break;
+                    case DRIVE_REMOTE: type_str = "网络"; break;
+                    case DRIVE_CDROM: type_str = "光盘"; break;
+                    case DRIVE_RAMDISK: type_str = "内存盘"; break;
+                    default: type_str = "未知(" + std::to_string(drive_type) + ")"; break;
+                }
+
+                ULARGE_INTEGER free_bytes, total_bytes, free_avail;
+                std::cout << static_cast<char>(letter) << ":\t" << type_str << "\t";
+                if (GetDiskFreeSpaceExW(root_path.c_str(), &free_avail, &total_bytes, &free_bytes)) {
+                    std::wstring size_wstr = utils::FormatFileSize(total_bytes.QuadPart);
+                    std::string size_str(size_wstr.begin(), size_wstr.end());
+                    std::cout << size_str;
+                } else {
+                    std::cout << "(无法获取大小)";
+                }
+                std::cout << "\n";
+            }
+        }
+
+        // Try to enumerate physical disks
+        std::cout << "\n=== 物理磁盘 ===\n\n";
+
         auto disks = DiskInfoQuery::EnumeratePhysicalDisks();
         if (disks.empty()) {
-            std::cout << "未找到任何磁盘\n";
-            return;
-        }
-        for (const auto& disk : disks) {
-            std::wcout << L"磁盘 " << disk.physical_drive_number
-                       << L": " << disk.model_name
-                       << L" (" << utils::FormatFileSize(disk.disk_size_bytes) << L")\n";
-            std::wcout << L"  扇区大小: " << disk.geometry.sector_size
-                       << L"  总扇区数: " << disk.geometry.total_sectors << L"\n";
-            for (const auto& part : disk.partitions) {
-                std::wcout << L"  分区 " << part.index
-                           << L": " << part.filesystem_type
-                           << L" 起始=" << part.start_sector
-                           << L" 大小=" << utils::FormatFileSize(part.sector_count * 512)
-                           << L"\n";
+            if (!is_admin) {
+                std::cout << "无法访问物理磁盘 - 需要管理员权限\n";
+                std::cout << "\n要扫描物理磁盘进行数据恢复，请:\n";
+                std::cout << "  1. 右键点击命令提示符或 PowerShell\n";
+                std::cout << "  2. 选择\"以管理员身份运行\"\n";
+                std::cout << "  3. 导航到此程序目录并重新运行\n";
+            } else {
+                std::cout << "未找到任何物理磁盘\n";
+            }
+        } else {
+            std::cout << "找到 " << disks.size() << " 个物理磁盘:\n\n";
+            for (const auto& disk : disks) {
+                std::cout << "磁盘 " << disk.physical_drive_number << ": ";
+                std::string model_str(disk.model_name.begin(), disk.model_name.end());
+                std::cout << model_str << " (";
+                std::wstring size_wstr = utils::FormatFileSize(disk.disk_size_bytes);
+                std::string size_str(size_wstr.begin(), size_wstr.end());
+                std::cout << size_str << ")\n";
+                std::cout << "  扇区大小: " << disk.geometry.sector_size
+                          << "  总扇区数: " << disk.geometry.total_sectors << "\n";
+                for (const auto& part : disk.partitions) {
+                    std::cout << "  分区 " << part.index << ": ";
+                    std::string fs_str(part.filesystem_type.begin(), part.filesystem_type.end());
+                    std::cout << fs_str << " 起始=" << part.start_sector << " 大小=";
+                    std::wstring part_size_wstr = utils::FormatFileSize(part.sector_count * 512);
+                    std::string part_size_str(part_size_wstr.begin(), part_size_wstr.end());
+                    std::cout << part_size_str << "\n";
+                }
             }
         }
     });
@@ -390,6 +460,149 @@ int main(int argc, char** argv) {
         db.close();
     });
 
+    // list-files
+    std::string list_files_session, list_files_db;
+    int list_files_limit = 20;
+    int list_files_offset = 0;
+    std::string list_files_type, list_files_ext;
+
+    auto list_files_cmd = app.add_subcommand("list-files", "列出扫描结果中的文件");
+    list_files_cmd->add_option("session", list_files_session, "扫描会话ID")->default_val("default");
+    list_files_cmd->add_option("--db", list_files_db, "缓存数据库路径")->default_val("scan_cache.db");
+    list_files_cmd->add_option("--limit,-l", list_files_limit, "显示文件数量")->default_val(20);
+    list_files_cmd->add_option("--offset,-o", list_files_offset, "分页偏移量")->default_val(0);
+    list_files_cmd->add_option("--type,-t", list_files_type, "文件类型过滤 (image/video/unknown)");
+    list_files_cmd->add_option("--ext,-e", list_files_ext, "扩展名过滤 (如 jpg,png,mp4)");
+
+    list_files_cmd->callback([&]() {
+        ScanCacheDB db;
+        std::wstring db_path = std::wstring(list_files_db.begin(), list_files_db.end());
+        if (!db.open(db_path)) {
+            std::cerr << "无法打开数据库: " << list_files_db << "\n";
+            return;
+        }
+
+        uint32_t total_count = db.query_file_count(list_files_session);
+        if (total_count == 0) {
+            std::cout << "会话 " << list_files_session << " 中没有文件\n";
+            db.close();
+            return;
+        }
+
+        std::cout << "会话: " << list_files_session << "\n";
+        std::cout << "总文件数: " << total_count << "\n\n";
+
+        // Query files
+        auto files = db.query_files(list_files_session, list_files_limit, list_files_offset);
+
+        if (files.empty()) {
+            std::cout << "没有更多文件\n";
+            db.close();
+            return;
+        }
+
+        // Parse extension filter
+        std::vector<std::wstring> ext_filter;
+        if (!list_files_ext.empty()) {
+            std::wstring ext_w = std::wstring(list_files_ext.begin(), list_files_ext.end());
+            std::wstringstream wss(ext_w);
+            std::wstring ext;
+            while (std::getline(wss, ext, L',')) {
+                // Trim and convert to lowercase
+                size_t start = ext.find_first_not_of(L" \t.");
+                size_t end = ext.find_last_not_of(L" \t.");
+                if (start != std::wstring::npos && end != std::wstring::npos) {
+                    std::wstring clean_ext = ext.substr(start, end - start + 1);
+                    std::transform(clean_ext.begin(), clean_ext.end(), clean_ext.begin(), ::towlower);
+                    ext_filter.push_back(clean_ext);
+                }
+            }
+        }
+
+        // Display file list
+        std::cout << "序号\t名称\t\t\t\t类型\t大小\t\t扩展名\t状态\n";
+        std::cout << "----\t----\t\t\t\t----\t----\t\t------\t----\n";
+
+        int displayed = 0;
+        for (const auto& f : files) {
+            // File type filter
+            if (!list_files_type.empty()) {
+                std::string type_lower = list_files_type;
+                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
+
+                bool type_match = false;
+                if (type_lower == "image" && f.file_type == FileType::Image) type_match = true;
+                else if (type_lower == "video" && f.file_type == FileType::Video) type_match = true;
+                else if (type_lower == "unknown" && f.file_type == FileType::Unknown) type_match = true;
+
+                if (!type_match) continue;
+            }
+
+            // Extension filter
+            if (!ext_filter.empty()) {
+                // Extract extension from file name
+                std::wstring ext;
+                size_t dot_pos = f.file_name.rfind(L'.');
+                if (dot_pos != std::wstring::npos) {
+                    ext = f.file_name.substr(dot_pos + 1);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                }
+
+                bool ext_match = false;
+                for (const auto& ef : ext_filter) {
+                    if (ext == ef) {
+                        ext_match = true;
+                        break;
+                    }
+                }
+                if (!ext_match) continue;
+            }
+
+            // Display file info
+            std::cout << (list_files_offset + displayed + 1) << "\t";
+
+            // Truncate long file names
+            std::wstring display_name = f.file_name;
+            if (display_name.length() > 24) {
+                display_name = display_name.substr(0, 21) + L"...";
+            }
+            std::wcout << display_name << L"\t";
+
+            // File type
+            switch (f.file_type) {
+                case FileType::Image: std::cout << "图片\t"; break;
+                case FileType::Video: std::cout << "视频\t"; break;
+                default: std::cout << "未知\t"; break;
+            }
+
+            // File size
+            std::wcout << utils::FormatFileSize(f.file_size) << L"\t";
+
+            // Extension
+            size_t dot_pos = f.file_name.rfind(L'.');
+            if (dot_pos != std::wstring::npos) {
+                std::wcout << f.file_name.substr(dot_pos + 1);
+            } else {
+                std::wcout << L"-";
+            }
+            std::wcout << L"\t";
+
+            // Status
+            std::wcout << (f.is_corrupted ? L"损坏" : L"正常");
+            std::wcout << L"\n";
+
+            displayed++;
+        }
+
+        std::cout << "\n显示 " << displayed << " 个文件";
+        if (list_files_offset + list_files_limit < static_cast<int>(total_count)) {
+            std::cout << " (还有 " << (total_count - list_files_offset - displayed) << " 个文件)";
+        }
+        std::cout << "\n";
+
+        db.close();
+    });
+
     // preview
     std::string preview_session, preview_db, preview_file_ref, preview_output;
     std::string preview_device;
@@ -563,6 +776,85 @@ int main(int argc, char** argv) {
 
             handle.close();
         }
+
+        db.close();
+    });
+
+    // review (alias for preview)
+    std::string review_session, review_db, review_file_ref, review_output;
+    std::string review_device;
+
+    auto review_cmd = app.add_subcommand("review", "预览扫描结果中的文件 (preview 的别名)");
+    review_cmd->add_option("session", review_session, "扫描会话ID")->required();
+    review_cmd->add_option("--db", review_db, "缓存数据库路径")->default_val("scan_cache.db");
+    review_cmd->add_option("--file", review_file_ref, "文件索引或名称")->required();
+    review_cmd->add_option("--output", review_output, "缩略图输出路径");
+    review_cmd->add_option("--device", review_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)");
+
+    review_cmd->callback([&]() {
+        // Forward to preview logic - same implementation
+        ScanCacheDB db;
+        std::wstring db_path = std::wstring(review_db.begin(), review_db.end());
+        if (!db.open(db_path)) {
+            std::cerr << "无法打开数据库: " << review_db << "\n";
+            return;
+        }
+
+        uint32_t file_count = db.query_file_count(review_session);
+        if (file_count == 0) {
+            std::cout << "会话 " << review_session << " 中没有文件\n";
+            db.close();
+            return;
+        }
+
+        RecoverableFile target_file;
+        bool found = false;
+        uint32_t target_index = 0;
+
+        try {
+            target_index = std::stoul(review_file_ref);
+            if (target_index < file_count) {
+                auto files = db.query_files(review_session, 1, target_index);
+                if (!files.empty()) {
+                    target_file = files[0];
+                    found = true;
+                }
+            }
+        } catch (...) {}
+
+        if (!found) {
+            std::wstring search_name = std::wstring(review_file_ref.begin(), review_file_ref.end());
+            uint32_t batch_size = 100;
+            for (uint32_t offset = 0; offset < file_count && !found; offset += batch_size) {
+                auto files = db.query_files(review_session, batch_size, offset);
+                for (const auto& f : files) {
+                    if (f.file_name.find(search_name) != std::wstring::npos) {
+                        target_file = f;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!found) {
+            std::cout << "未找到文件: " << review_file_ref << "\n";
+            db.close();
+            return;
+        }
+
+        std::wcout << L"文件信息:\n";
+        std::wcout << L"  名称: " << target_file.file_name << L"\n";
+        std::wcout << L"  大小: " << utils::FormatFileSize(target_file.file_size) << L"\n";
+        std::wcout << L"  类型: ";
+        switch (target_file.file_type) {
+            case FileType::Image: std::wcout << L"图片"; break;
+            case FileType::Video: std::wcout << L"视频"; break;
+            default: std::wcout << L"未知"; break;
+        }
+        std::wcout << L"\n";
+        std::wcout << L"  状态: " << (target_file.is_corrupted ? L"已损坏" : L"正常") << L"\n";
+        std::wcout << L"  片段数: " << target_file.fragments.size() << L"\n";
 
         db.close();
     });

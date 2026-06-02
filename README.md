@@ -180,13 +180,30 @@ disk-recover-cli recover --session myscan --output "D:\Recovered"
 #### 查看扫描结果
 
 ```bash
+# 列出扫描结果中的文件
 disk-recover-cli list-files --session myscan
+
+# 分页查看
+disk-recover-cli list-files --session myscan --limit 50 --offset 100
+
+# 按类型过滤
+disk-recover-cli list-files --session myscan --type image
+
+# 按扩展名过滤
+disk-recover-cli list-files --session myscan --ext jpg,png
 ```
 
 #### 生成预览缩略图
 
 ```bash
-disk-recover-cli preview --session myscan --output "D:\thumbnails"
+# 预览特定文件
+disk-recover-cli preview --session myscan --file 1
+
+# 或使用 review 命令（preview 的别名）
+disk-recover-cli review --session myscan --file "photo.jpg"
+
+# 生成缩略图到指定路径
+disk-recover-cli preview --session myscan --file 1 --output "D:\thumbnails\preview.png" --device "\\.\PhysicalDrive0"
 ```
 
 ## 扫描模式详解
