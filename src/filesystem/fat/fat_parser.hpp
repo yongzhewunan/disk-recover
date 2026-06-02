@@ -4,6 +4,7 @@
 #include "../../common/types.hpp"
 #include <vector>
 #include <functional>
+#include <unordered_map>
 
 namespace disk_recover::fat {
 
@@ -35,6 +36,17 @@ private:
                              const std::function<void(RecoverableFile&&)>& callback,
                              bool include_deleted, int depth,
                              const std::function<bool()>& should_stop);
+
+    // FAT sector cache for performance optimization
+    struct FatCacheEntry {
+        std::vector<uint8_t> data;
+        uint64_t sector;
+    };
+    static constexpr size_t FAT_CACHE_SIZE = 64;  // Cache up to 64 FAT sectors
+    std::unordered_map<uint64_t, FatCacheEntry> fat_cache_;
+    std::vector<uint64_t> fat_cache_order_;  // LRU order
+    void cache_fat_sector(SectorReader& reader, uint64_t sector);
+    const uint8_t* get_cached_fat_sector(uint64_t sector);
 
     FatType fat_type_ = FatType::Unknown;
     uint64_t partition_start_ = 0;

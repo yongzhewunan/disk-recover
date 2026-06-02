@@ -293,7 +293,7 @@ void SignatureScanner::scan(SectorReader& reader, const ScanConfig& config,
     progress.total_sectors = config.end_sector - config.start_sector;
 
     const uint32_t sector_size = reader.sector_size();
-    const uint32_t BATCH_SECTORS = 256;
+    const uint32_t BATCH_SECTORS = 8192;  // 4MB per batch for optimal I/O throughput
 
     // Compute scan start with overlap for resume
     uint64_t scan_start = config.start_sector;

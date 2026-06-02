@@ -28,21 +28,39 @@ bool SectorReader::read_sectors(uint64_t start_sector, uint32_t count, AlignedBu
 }
 
 bool SectorReader::read_sectors_checked(uint64_t start_sector, uint32_t count, AlignedBuffer& buffer) {
-    if (bad_sectors_ && bad_sectors_->is_bad(start_sector)) {
+    // Check if this sector is already known to be bad
+    bool is_known_bad = bad_sectors_ && bad_sectors_->is_bad(start_sector);
+
+    // Apply policy for known bad sectors
+    if (is_known_bad) {
         switch (policy_) {
             case BadSectorPolicy::Skip:
                 return false;
-            case BadSectorPolicy::Retry: {
-                for (int i = 0; i < 3; ++i) {
-                    if (read_sectors(start_sector, count, buffer)) return true;
-                }
-                return false;
-            }
+            case BadSectorPolicy::Retry:
+                // Fall through to retry logic below
+                break;
             case BadSectorPolicy::ForceRead:
+                // Attempt to read anyway
                 break;
         }
     }
-    return read_sectors(start_sector, count, buffer);
+
+    // Try initial read
+    if (read_sectors(start_sector, count, buffer)) {
+        return true;
+    }
+
+    // Read failed - apply Retry policy if configured
+    if (policy_ == BadSectorPolicy::Retry) {
+        for (int i = 0; i < 3; ++i) {
+            if (read_sectors(start_sector, count, buffer)) {
+                // Success on retry - clear bad sector record if it was marked
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 bool SectorReader::read_sectors_split(uint64_t start_sector, uint32_t count,
@@ -63,11 +81,44 @@ bool SectorReader::read_sectors_split_impl(uint64_t start_sector, uint32_t count
     if (count == 0) return false;
     if (should_stop && should_stop()) return false;
 
+    // Check if this range contains known bad sectors
+    bool has_known_bad = false;
+    if (bad_sectors_) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (bad_sectors_->is_bad(start_sector + i)) {
+                has_known_bad = true;
+                break;
+            }
+        }
+    }
+
+    // Apply Skip policy: if range contains known bad sectors, skip entirely
+    if (has_known_bad && policy_ == BadSectorPolicy::Skip) {
+        memset(out_ptr, 0, static_cast<size_t>(count) * sector_size_);
+        out_bad_count = count;
+        return false;
+    }
+
+    // Try initial read
     if (read_sectors(start_sector, count, scratch_buf)) {
         memcpy(out_ptr, scratch_buf.data(), static_cast<size_t>(count) * sector_size_);
         return true;
     }
 
+    // Read failed - apply Retry policy before splitting
+    if (policy_ == BadSectorPolicy::Retry) {
+        bool retry_success = false;
+        for (int retry = 0; retry < 3; ++retry) {
+            if (read_sectors(start_sector, count, scratch_buf)) {
+                memcpy(out_ptr, scratch_buf.data(), static_cast<size_t>(count) * sector_size_);
+                return true;
+            }
+        }
+    }
+
+    // ForceRead policy or retries exhausted - split and continue
+
+    // Single sector case - mark as bad and fill with zeros
     if (count == 1) {
         if (bad_sectors_) bad_sectors_->record(start_sector, 1);
         memset(out_ptr, 0, sector_size_);
@@ -75,6 +126,7 @@ bool SectorReader::read_sectors_split_impl(uint64_t start_sector, uint32_t count
         return false;
     }
 
+    // Split into two halves and recurse
     uint32_t left_count = count / 2;
     uint32_t right_count = count - left_count;
     uint32_t left_bad = 0, right_bad = 0;

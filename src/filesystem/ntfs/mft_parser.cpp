@@ -131,55 +131,91 @@ bool MftParser::enumerate_mft(SectorReader& reader,
                               bool include_deleted,
                               std::function<bool()> should_stop) {
     uint32_t sectors_per_record = mft_record_size_ / sector_size_;
-    AlignedBuffer buf(mft_record_size_, sector_size_);
 
-    LOG_FMT(L"[MftParser] enumerate_mft: entry_count=%llu, sectors_per_record=%u, mft_start=%llu",
-             mft_entry_count_, sectors_per_record, mft_start_sector_);
+    // Batch read optimization: read multiple MFT records at once
+    const uint32_t BATCH_RECORDS = 64;  // Read 64 records per I/O (64KB for 1KB records)
+    const uint32_t BATCH_SECTORS = BATCH_RECORDS * sectors_per_record;
+
+    AlignedBuffer batch_buf(BATCH_SECTORS * sector_size_, sector_size_);
+    AlignedBuffer single_buf(mft_record_size_, sector_size_);
+
+    LOG_FMT(L"[MftParser] enumerate_mft: entry_count=%llu, sectors_per_record=%u, mft_start=%llu, batch=%u records",
+             mft_entry_count_, sectors_per_record, mft_start_sector_, BATCH_RECORDS);
 
     uint64_t file_count = 0;
     uint64_t dir_count = 0;
     uint64_t parse_fail_count = 0;
 
-    for (uint64_t i = 0; i < mft_entry_count_; ++i) {
+    for (uint64_t batch_start = 0; batch_start < mft_entry_count_; batch_start += BATCH_RECORDS) {
         if (should_stop && should_stop()) {
-            LOG_FMT(L"[MftParser] Stop requested at entry %llu", i);
-            break;
-        }
-        uint64_t sector = mft_start_sector_ + i * sectors_per_record;
-        if (!reader.read_sectors(sector, sectors_per_record, buf)) {
-            LOG_FMT(L"[MftParser] read_sectors failed at entry %llu (sector %llu)", i, sector);
+            LOG_FMT(L"[MftParser] Stop requested at batch %llu", batch_start);
             break;
         }
 
-        apply_usa_fixup(buf.data(), mft_record_size_, sector_size_);
+        uint64_t batch_end = (std::min)(batch_start + BATCH_RECORDS, mft_entry_count_);
+        uint64_t batch_sector = mft_start_sector_ + batch_start * sectors_per_record;
+        uint32_t batch_count = static_cast<uint32_t>((batch_end - batch_start) * sectors_per_record);
 
-        auto* hdr = reinterpret_cast<const MftRecordHeader*>(buf.data());
-        if (hdr->signature != 0x454C4946) continue;  // "FILE"
-
-        // Skip directory entries
-        if (hdr->flags & MFT_FLAG_DIRECTORY) {
-            dir_count++;
+        // Try batch read first
+        if (!reader.read_sectors(batch_sector, batch_count, batch_buf)) {
+            // Fall back to single record reads on batch failure
+            for (uint64_t i = batch_start; i < batch_end; ++i) {
+                if (should_stop && should_stop()) break;
+                uint64_t sector = mft_start_sector_ + i * sectors_per_record;
+                if (!reader.read_sectors(sector, sectors_per_record, single_buf)) {
+                    parse_fail_count++;
+                    continue;
+                }
+                process_mft_record(single_buf.data(), i, include_deleted, callback,
+                                   file_count, dir_count, parse_fail_count);
+            }
             continue;
         }
 
-        bool is_deleted = !(hdr->flags & MFT_FLAG_IN_USE);
-        if (is_deleted && !include_deleted) continue;
+        // Process each record in the batch
+        for (uint64_t i = batch_start; i < batch_end; ++i) {
+            if (should_stop && should_stop()) break;
 
-        RecoverableFile file{};
-        file.mft_id = i;
-        if (parse_mft_record(buf.data(), mft_record_size_, file, is_deleted)) {
-            file.file_type = detect_file_type(file.file_name);
-            file.is_corrupted = is_deleted;
-            callback(std::move(file));
-            file_count++;
-        } else {
-            parse_fail_count++;
+            uint32_t offset_in_batch = static_cast<uint32_t>((i - batch_start) * mft_record_size_);
+            uint8_t* record_data = batch_buf.data() + offset_in_batch;
+
+            process_mft_record(record_data, i, include_deleted, callback,
+                               file_count, dir_count, parse_fail_count);
         }
     }
 
     LOG_FMT(L"[MftParser] enumerate_mft done: files=%llu, dirs=%llu, parse_fails=%llu",
              file_count, dir_count, parse_fail_count);
     return true;
+}
+
+void MftParser::process_mft_record(uint8_t* data, uint64_t entry_index, bool include_deleted,
+                                   std::function<void(RecoverableFile&&)> callback,
+                                   uint64_t& file_count, uint64_t& dir_count, uint64_t& parse_fail_count) {
+    apply_usa_fixup(data, mft_record_size_, sector_size_);
+
+    auto* hdr = reinterpret_cast<const MftRecordHeader*>(data);
+    if (hdr->signature != 0x454C4946) return;  // "FILE"
+
+    // Skip directory entries
+    if (hdr->flags & MFT_FLAG_DIRECTORY) {
+        dir_count++;
+        return;
+    }
+
+    bool is_deleted = !(hdr->flags & MFT_FLAG_IN_USE);
+    if (is_deleted && !include_deleted) return;
+
+    RecoverableFile file{};
+    file.mft_id = entry_index;
+    if (parse_mft_record(data, mft_record_size_, file, is_deleted)) {
+        file.file_type = detect_file_type(file.file_name);
+        file.is_corrupted = is_deleted;
+        callback(std::move(file));
+        file_count++;
+    } else {
+        parse_fail_count++;
+    }
 }
 
 bool MftParser::parse_mft_record(const uint8_t* data, uint32_t size,

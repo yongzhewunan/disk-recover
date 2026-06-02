@@ -60,7 +60,7 @@ public:
     void set_file_found_callback(std::function<void(const RecoverableFile&)> cb) { on_file_found_ = std::move(cb); }
 
 private:
-    static constexpr size_t FLUSH_THRESHOLD = 50;
+    static constexpr size_t FLUSH_THRESHOLD = 1000;  // Flush every 1000 files for better throughput
 
     void scan_thread_func(Config config);
     void flush_cache(const std::string& session_id);

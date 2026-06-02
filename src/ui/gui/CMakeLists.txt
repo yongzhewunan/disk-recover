@@ -39,4 +39,6 @@ if(MSVC)
         WIN32_LEAN_AND_MEAN
         NOMINMAX
     )
+    # Use UTF-8 source and execution character set
+    target_compile_options(disk-recover PRIVATE /utf-8)
 endif()

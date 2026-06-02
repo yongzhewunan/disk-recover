@@ -1,15 +1,11 @@
 #pragma once
+#include "business/recovery_manager.hpp"
 #include <string>
 #include <vector>
 #include <cstdint>
 #include <windows.h>
 
 namespace disk_recover {
-
-struct SaveDirEntry {
-    std::wstring path;
-    uint64_t free_bytes = 0;
-};
 
 class SaveDirsDialog {
 public:

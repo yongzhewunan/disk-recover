@@ -298,15 +298,17 @@ void RecoveryManager::recovery_thread_func(RecoveryConfig config) {
 
     SectorReader sector_reader(disk_handle, config.sector_size);
 
-    // 6. Loop: query files in pages of 100
-    const uint32_t PAGE_SIZE = 100;
-    uint32_t offset = static_cast<uint32_t>(last_file_index_);
+    // 6. Loop: query files using cursor-based pagination for efficiency
+    const uint32_t PAGE_SIZE = 1000;  // Larger page size for better throughput
+    uint64_t last_db_id = 0;
 
     auto last_progress_time = std::chrono::steady_clock::now();
     uint32_t files_since_progress = 0;
 
-    while (offset < total_files && !stop_requested_.load()) {
-        auto files = cache_db_.query_files(config.session_id, PAGE_SIZE, offset);
+    while (last_file_index_ < total_files && !stop_requested_.load()) {
+        auto files = cache_db_.query_files_after_id(config.session_id, PAGE_SIZE, last_db_id);
+
+        if (files.empty()) break;
 
         for (size_t i = 0; i < files.size(); ++i) {
             // a. Check stop
@@ -335,6 +337,7 @@ void RecoveryManager::recovery_thread_func(RecoveryConfig config) {
                         stats_.files_failed++;
                     }
                     last_file_index_++;
+                    last_db_id = files[i].db_id;
                     continue;
                 }
             }
@@ -352,6 +355,7 @@ void RecoveryManager::recovery_thread_func(RecoveryConfig config) {
                 stats_.files_failed++;
             }
             last_file_index_++;
+            last_db_id = files[i].db_id;  // Update cursor for next query
             files_since_progress++;
 
             // f. PostMessage WM_RECOVERY_PROGRESS every 10 files or every 2 seconds
@@ -379,8 +383,6 @@ void RecoveryManager::recovery_thread_func(RecoveryConfig config) {
         }
 
         if (stop_requested_.load()) break;
-
-        offset += PAGE_SIZE;
     }
 
     // 7. Save final progress state
@@ -434,7 +436,9 @@ bool RecoveryManager::recover_single_file(const RecoverableFile& file,
     }
 
     // 4. Read file data from disk sectors and write to output
-    AlignedBuffer buf(reader.sector_size() * 64, reader.sector_size());
+    // Use 4MB buffer for large file throughput (8192 sectors * 512 bytes)
+    const uint32_t BUFFER_SECTORS = 8192;
+    AlignedBuffer buf(reader.sector_size() * BUFFER_SECTORS, reader.sector_size());
 
     bool success = true;
     for (const auto& frag : file.fragments) {
@@ -447,7 +451,7 @@ bool RecoveryManager::recover_single_file(const RecoverableFile& file,
                 break;
             }
 
-            uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(remaining, 64));
+            uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(remaining, BUFFER_SECTORS));
             if (!reader.read_sectors(sector, count, buf)) {
                 LOG_FMT(L"[RecoveryManager] Failed to read sector %llu (count=%u) for file: %s",
                          sector, count, file.file_name.c_str());

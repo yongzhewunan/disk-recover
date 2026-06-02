@@ -359,6 +359,56 @@ std::vector<RecoverableFile> ScanCacheDB::query_files(const std::string& session
     return files;
 }
 
+std::vector<RecoverableFile> ScanCacheDB::query_files_after_id(const std::string& session_id,
+                                                                uint32_t limit, uint64_t last_id) {
+    std::vector<RecoverableFile> files;
+
+    // Use WHERE id > last_id for efficient pagination
+    const char* sql = R"(
+        SELECT id, file_name, file_size, file_type, is_corrupted, mft_id, fragments
+        FROM scan_result
+        WHERE session_id = ? AND id > ?
+        ORDER BY id
+        LIMIT ?
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return files;
+
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(last_id));
+    sqlite3_bind_int(stmt, 3, static_cast<int>(limit));
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        RecoverableFile file;
+
+        // Store the id for next pagination
+        file.db_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
+
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        int name_len = sqlite3_column_bytes(stmt, 1);
+        file.file_name = utf8_to_wstring(name, name_len);
+
+        file.file_size = static_cast<uint64_t>(sqlite3_column_int64(stmt, 2));
+        file.file_type = static_cast<FileType>(sqlite3_column_int(stmt, 3));
+        file.is_corrupted = sqlite3_column_int(stmt, 4) != 0;
+
+        if (sqlite3_column_type(stmt, 5) != SQLITE_NULL) {
+            file.mft_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 5));
+        }
+
+        const void* frag_data = sqlite3_column_blob(stmt, 6);
+        int frag_size = sqlite3_column_bytes(stmt, 6);
+        file.fragments = deserialize_fragments(frag_data, frag_size);
+
+        files.push_back(std::move(file));
+    }
+
+    sqlite3_finalize(stmt);
+    return files;
+}
+
 bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgress& progress) {
     const char* sql = R"(
         INSERT OR REPLACE INTO scan_progress

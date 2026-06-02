@@ -96,27 +96,75 @@ uint32_t FatParser::cluster_to_sector(uint32_t cluster) const {
            + (cluster - 2) * sectors_per_cluster_;
 }
 
-uint32_t FatParser::get_fat_entry(SectorReader& reader, uint32_t cluster) {
-    AlignedBuffer buf(bytes_per_sector_, bytes_per_sector_);
+void FatParser::cache_fat_sector(SectorReader& reader, uint64_t sector) {
+    // Check if already cached
+    if (fat_cache_.find(sector) != fat_cache_.end()) {
+        // Move to front of LRU
+        auto it = std::find(fat_cache_order_.begin(), fat_cache_order_.end(), sector);
+        if (it != fat_cache_order_.end()) {
+            fat_cache_order_.erase(it);
+            fat_cache_order_.insert(fat_cache_order_.begin(), sector);
+        }
+        return;
+    }
 
+    // Evict oldest if cache is full
+    if (fat_cache_.size() >= FAT_CACHE_SIZE) {
+        uint64_t oldest = fat_cache_order_.back();
+        fat_cache_order_.pop_back();
+        fat_cache_.erase(oldest);
+    }
+
+    // Read and cache the sector
+    AlignedBuffer buf(bytes_per_sector_, bytes_per_sector_);
+    if (reader.read_sectors(sector, 1, buf)) {
+        FatCacheEntry entry;
+        entry.data.assign(buf.data(), buf.data() + bytes_per_sector_);
+        entry.sector = sector;
+        fat_cache_[sector] = std::move(entry);
+        fat_cache_order_.insert(fat_cache_order_.begin(), sector);
+    }
+}
+
+const uint8_t* FatParser::get_cached_fat_sector(uint64_t sector) {
+    auto it = fat_cache_.find(sector);
+    if (it != fat_cache_.end()) {
+        return it->second.data.data();
+    }
+    return nullptr;
+}
+
+uint32_t FatParser::get_fat_entry(SectorReader& reader, uint32_t cluster) {
     if (fat_type_ == FatType::Fat12) {
         uint32_t fat_offset = cluster + cluster / 2;
         uint32_t fat_sector = partition_start_ + reserved_sectors_ + fat_offset / bytes_per_sector_;
-        if (!reader.read_sectors(fat_sector, 1, buf)) return 0;
-        uint16_t entry = *reinterpret_cast<const uint16_t*>(buf.data() + fat_offset % bytes_per_sector_);
+
+        cache_fat_sector(reader, fat_sector);
+        const uint8_t* data = get_cached_fat_sector(fat_sector);
+        if (!data) return 0;
+
+        uint16_t entry = *reinterpret_cast<const uint16_t*>(data + fat_offset % bytes_per_sector_);
         if (cluster & 1) entry >>= 4;
         else entry &= 0x0FFF;
         return entry;
     } else if (fat_type_ == FatType::Fat16) {
         uint32_t fat_offset = cluster * 2;
         uint32_t fat_sector = partition_start_ + reserved_sectors_ + fat_offset / bytes_per_sector_;
-        if (!reader.read_sectors(fat_sector, 1, buf)) return 0;
-        return *reinterpret_cast<const uint16_t*>(buf.data() + fat_offset % bytes_per_sector_);
+
+        cache_fat_sector(reader, fat_sector);
+        const uint8_t* data = get_cached_fat_sector(fat_sector);
+        if (!data) return 0;
+
+        return *reinterpret_cast<const uint16_t*>(data + fat_offset % bytes_per_sector_);
     } else {
         uint32_t fat_offset = cluster * 4;
         uint32_t fat_sector = partition_start_ + reserved_sectors_ + fat_offset / bytes_per_sector_;
-        if (!reader.read_sectors(fat_sector, 1, buf)) return 0;
-        return *reinterpret_cast<const uint32_t*>(buf.data() + fat_offset % bytes_per_sector_) & 0x0FFFFFFF;
+
+        cache_fat_sector(reader, fat_sector);
+        const uint8_t* data = get_cached_fat_sector(fat_sector);
+        if (!data) return 0;
+
+        return *reinterpret_cast<const uint32_t*>(data + fat_offset % bytes_per_sector_) & 0x0FFFFFFF;
     }
 }
 

@@ -30,6 +30,7 @@ struct DiskExtent {
 };
 
 struct RecoverableFile {
+    uint64_t db_id = 0;  // Database row ID for efficient pagination
     std::wstring file_name;
     uint64_t file_size;
     std::vector<DiskExtent> fragments;

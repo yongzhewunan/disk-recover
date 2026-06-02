@@ -27,6 +27,11 @@ private:
     static void apply_usa_fixup(uint8_t* data, uint32_t size, uint32_t sector_size);
     static FileType detect_file_type(const std::wstring& filename);
 
+    // Helper for batch processing
+    void process_mft_record(uint8_t* data, uint64_t entry_index, bool include_deleted,
+                            std::function<void(RecoverableFile&&)> callback,
+                            uint64_t& file_count, uint64_t& dir_count, uint64_t& parse_fail_count);
+
     uint64_t partition_start_ = 0;
     uint64_t mft_start_sector_ = 0;
     uint64_t mft_entry_count_ = 0;

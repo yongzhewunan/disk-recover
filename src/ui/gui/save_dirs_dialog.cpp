@@ -1,6 +1,7 @@
 #include "save_dirs_dialog.hpp"
 #include "disk-io/disk_info.hpp"
 #include "common/logger.hpp"
+#include <windowsx.h>
 #include <shlobj.h>
 #include <commctrl.h>
 #include <algorithm>
@@ -75,12 +76,12 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         // Buttons
         HWND hAdd = CreateWindowW(L"BUTTON", L"添加目录",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 270, 100, 30, hwnd, reinterpret_cast<HMENU>(IDOK + 1), cs->hInstance, nullptr);
+            10, 270, 100, 30, hwnd, reinterpret_cast<HMENU>(1002), cs->hInstance, nullptr);
         SendMessageW(hAdd, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
         HWND hRemove = CreateWindowW(L"BUTTON", L"删除",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            120, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(IDOK + 2), cs->hInstance, nullptr);
+            120, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(1003), cs->hInstance, nullptr);
         SendMessageW(hRemove, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
         HWND hOk = CreateWindowW(L"BUTTON", L"确定",
@@ -98,7 +99,7 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case IDOK + 1: {
+        case 1002: {
             // Add directory
             BROWSEINFOW bi = {};
             bi.hwndOwner = hwnd;
@@ -140,7 +141,7 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
         }
 
-        case IDOK + 2: {
+        case 1003: {
             // Remove selected
             int sel = ListBox_GetCurSel(data->hList);
             if (sel != LB_ERR && sel < static_cast<int>(data->dirs.size())) {

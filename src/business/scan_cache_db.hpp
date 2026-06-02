@@ -34,6 +34,10 @@ public:
     std::vector<RecoverableFile> query_files(const std::string& session_id,
                                               uint32_t limit, uint32_t offset);
 
+    // Efficient pagination using cursor (last_id) instead of OFFSET
+    std::vector<RecoverableFile> query_files_after_id(const std::string& session_id,
+                                                       uint32_t limit, uint64_t last_id);
+
     bool save_progress(const std::string& session_id, const ScanProgress& progress);
     bool load_progress(const std::string& session_id, ScanProgress& progress);
 

@@ -1144,6 +1144,12 @@ void MainWindow::StartRecovery() {
     config.hwnd = hwnd_;
     config.min_free_bytes = 1ULL << 30;  // 1 GB
 
+    // Set source disk path for recovery
+    if (disk) {
+        config.source_disk_path = disk->device_path;
+        config.sector_size = disk->geometry.sector_size;
+    }
+
     // Start async recovery
     if (!recoverManager_->start_recovery(config)) {
         MessageBoxW(hwnd_, L"无法启动恢复。", L"错误", MB_OK | MB_ICONERROR);
@@ -1159,59 +1165,6 @@ void MainWindow::StartRecovery() {
     EnableWindow(hDiskList_, FALSE);
     EnableWindow(hPartitionList_, FALSE);
     UpdateStatus(L"恢复中...");
-}
-    if (recoverManager_->is_recovering()) {
-        MessageBoxW(hwnd_, L"Recovery is already in progress.", L"Info", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    // Browse for output folder
-    wchar_t path[MAX_PATH] = {};
-    BROWSEINFOW bi = {};
-    bi.hwndOwner = hwnd_;
-    bi.pszDisplayName = path;
-    bi.lpszTitle = L"Select output folder for recovered files";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) {
-        return;  // User cancelled
-    }
-
-    wchar_t outputPath[MAX_PATH] = {};
-    SHGetPathFromIDListW(pidl, outputPath);
-    CoTaskMemFree(pidl);
-
-    // Get the selected disk for reading
-    const DiskInfo* disk = GetSelectedDisk();
-    if (!disk) {
-        MessageBoxW(hwnd_, L"No disk selected.", L"Error", MB_OK | MB_ICONERROR);
-        return;
-    }
-
-    // Build RecoveryConfig
-    RecoveryConfig config;
-    config.session_id = lastSessionId_;
-    config.db_path = lastDbPath_;
-    config.source_disk_path = disk->device_path;
-    config.sector_size = disk->geometry.sector_size;
-    config.hwnd = hwnd_;
-    config.min_free_bytes = 1ULL << 30;  // 1 GB
-
-    SaveDirEntry dir_entry;
-    dir_entry.path = outputPath;
-    config.save_dirs.push_back(dir_entry);
-
-    // Perform recovery (async)
-    UpdateStatus(L"Starting recovery...");
-    EnableWindow(hRecoverBtn_, FALSE);
-    EnableWindow(hScanBtn_, FALSE);
-
-    if (!recoverManager_->start_recovery(config)) {
-        MessageBoxW(hwnd_, L"Failed to start recovery.", L"Error", MB_OK | MB_ICONERROR);
-        EnableWindow(hRecoverBtn_, TRUE);
-        EnableWindow(hScanBtn_, TRUE);
-    }
 }
 
 void MainWindow::UpdatePreview(int selectedIndex) {
