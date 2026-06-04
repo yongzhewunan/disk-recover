@@ -1,6 +1,10 @@
 #include "main_window.hpp"
+#include "common/logger.hpp"
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+    // Initialize logger (logs to %TEMP%\disk-recover.log)
+    LOG_INIT(L"");
+
     disk_recover::MainWindow win;
     if (!win.create(hInst)) {
         return 1;

@@ -390,6 +390,11 @@ void MainWindow::on_start_pause() {
         // Min free space
         config.min_free_space = 2ULL * 1024 * 1024 * 1024;  // 2GB
 
+        // Database path for scan results persistence
+        wchar_t temp_path[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, temp_path);
+        config.db_path = std::wstring(temp_path) + L"disk-recover-scan.db";
+
         // HWND for PostMessage
         config.hwnd = hwnd_;
 

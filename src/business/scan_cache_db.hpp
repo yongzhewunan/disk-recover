@@ -24,6 +24,7 @@ public:
     ~ScanCacheDB();
     bool open(const std::wstring& db_path);
     void close();
+    bool is_open() const { return db_ != nullptr; }
 
     bool create_session(const std::string& session_id);
     bool insert_file(const std::string& session_id, const RecoverableFile& file);

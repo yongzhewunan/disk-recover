@@ -286,6 +286,19 @@ ScanAndRecoverManager::FileSystemType ScanAndRecoverManager::detect_filesystem(S
 void ScanAndRecoverManager::worker_thread(Config config) {
     LOG_MSG(L"[ScanRecover] Starting scan-recover thread");
 
+    // Open database for scan results persistence
+    if (!config.db_path.empty()) {
+        if (!cache_db_.open(config.db_path)) {
+            LOG_MSG(L"[ScanRecover] Warning: Failed to open database, continuing without persistence");
+        } else {
+            LOG_FMT(L"[ScanRecover] Database opened: %s", config.db_path.c_str());
+            if (!config.session_id.empty()) {
+                current_session_id_ = config.session_id;
+                cache_db_.create_session(config.session_id);
+            }
+        }
+    }
+
     DiskHandle handle;
     if (!handle.open(config.device_path)) {
         LOG_FMT(L"[ScanRecover] Failed to open disk: %s", config.device_path.c_str());
@@ -359,6 +372,11 @@ void ScanAndRecoverManager::worker_thread(Config config) {
                 progress_.files_failed++;
             }
             return;
+        }
+
+        // Save to database before recovery
+        if (cache_db_.is_open() && !current_session_id_.empty()) {
+            cache_db_.insert_file(current_session_id_, file);
         }
 
         // Get current target from writer
@@ -614,6 +632,20 @@ void ScanAndRecoverManager::worker_thread(Config config) {
     LOG_FMT(L"[ScanRecover] Complete: files=%u, recovered=%u, failed=%u, bytes=%llu, bad=%u, skipped=%u",
              progress_.files_found, progress_.files_recovered, progress_.files_failed,
              progress_.bytes_recovered, progress_.bad_sectors, progress_.sectors_skipped);
+
+    // Save final progress to database
+    if (cache_db_.is_open()) {
+        ScanProgress final_progress{};
+        final_progress.sectors_scanned = progress_.sectors_scanned;
+        final_progress.total_sectors = progress_.total_sectors;
+        final_progress.files_found = progress_.files_found;
+        final_progress.bad_sectors_hit = progress_.bad_sectors;
+        final_progress.is_complete = true;
+        if (!current_session_id_.empty()) {
+            cache_db_.save_progress(current_session_id_, final_progress);
+        }
+        cache_db_.close();
+    }
 
     running_ = false;
     if (config.on_progress) config.on_progress(progress_);
