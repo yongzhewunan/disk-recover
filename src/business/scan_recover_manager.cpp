@@ -46,8 +46,22 @@ void ScanAndRecoverManager::resume() {
 void ScanAndRecoverManager::stop() {
     stop_requested_ = true;
     paused_ = false;  // Unpause so worker can see stop flag and exit
+
     if (worker_.joinable()) {
-        worker_.join();
+        // Wait up to 5 seconds for worker to exit gracefully
+        // With read timeout implemented, worker should respond within timeout_ms
+        for (int i = 0; i < 50; ++i) {
+            if (!running_.load()) {
+                worker_.join();
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        // Worker didn't exit within timeout - log and detach to avoid blocking forever
+        LOG_MSG(L"[ScanRecover] Warning: Worker thread did not exit within 5 seconds, detaching");
+        worker_.detach();
+        running_.store(false);
     }
 }
 

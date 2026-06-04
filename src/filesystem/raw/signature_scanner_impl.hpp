@@ -377,6 +377,11 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
     uint64_t last_save_sector = scan_start;
     uint32_t consecutive_bad_batches = 0;
 
+    // Exponential backoff skip configuration
+    const SkipAheadConfig& skip_cfg = reader.skip_ahead_config();
+    uint64_t current_skip_distance = skip_cfg.skip_distance_sectors;
+    const uint64_t max_skip_distance = 65536;  // Cap at 32MB (65536 sectors * 512 bytes)
+
     for (uint64_t sector = scan_start; sector < config.end_sector; sector += BATCH_SECTORS) {
         if (config.should_stop && config.should_stop()) {
             LOG_MSG(L"[SigScanner] Stop requested, exiting scan loop");
@@ -391,8 +396,9 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
         if (bad_count == batch_count) {
             consecutive_bad_batches++;
-            if (consecutive_bad_batches >= 4) {
-                uint64_t actual_skip = (std::min)(1024ULL, config.end_sector - sector);
+            // Use configured threshold with exponential backoff
+            if (skip_cfg.enabled && consecutive_bad_batches >= skip_cfg.consecutive_bad_threshold) {
+                uint64_t actual_skip = (std::min)(current_skip_distance, config.end_sector - sector);
                 progress.sectors_scanned += actual_skip;
                 progress.bad_sectors_hit += actual_skip;
                 if (actual_skip >= BATCH_SECTORS) {
@@ -400,12 +406,17 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
                 } else {
                     sector -= (BATCH_SECTORS - actual_skip);
                 }
+                // Exponential backoff: double skip distance for next time
+                current_skip_distance = (std::min)(current_skip_distance * 2, max_skip_distance);
                 consecutive_bad_batches = 0;
-                LOG_FMT(L"[SigScanner] Adaptive skip: jumping past bad cluster to sector %llu", sector + BATCH_SECTORS);
+                LOG_FMT(L"[SigScanner] Adaptive skip: jumping %llu sectors to %llu (next skip=%llu)",
+                         actual_skip, sector + BATCH_SECTORS, current_skip_distance);
                 continue;
             }
         } else {
             consecutive_bad_batches = 0;
+            // Good read - reset to initial skip distance
+            current_skip_distance = skip_cfg.skip_distance_sectors;
         }
 
         for (uint32_t i = 0; i < batch_count; ++i) {

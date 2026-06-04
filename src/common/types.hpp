@@ -35,7 +35,7 @@ struct SkipAheadConfig {
 struct ReadTimeoutConfig {
     uint32_t timeout_ms = 5000;               // Timeout per read operation (ms)
     uint32_t retry_count = 3;                 // Retries before marking as bad
-    bool enabled = false;                     // Timeout feature toggle
+    bool enabled = true;                      // Timeout feature toggle (enabled by default)
 };
 
 struct DiskExtent {

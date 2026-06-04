@@ -28,16 +28,22 @@ public:
     void set_skip_ahead_config(const SkipAheadConfig& config) { skip_config_ = config; }
     void set_timeout_config(const ReadTimeoutConfig& config) { timeout_config_ = config; }
 
+    const SkipAheadConfig& skip_ahead_config() const { return skip_config_; }
+    const ReadTimeoutConfig& timeout_config() const { return timeout_config_; }
+
     uint32_t get_skip_ahead_count() const { return skip_ahead_count_; }
     void reset_bad_sector_counter() { skip_ahead_count_ = 0; }
 
     uint32_t sector_size() const { return sector_size_; }
 
 private:
+    bool read_sectors_with_timeout(uint64_t start_sector, uint32_t count,
+                                    AlignedBuffer& buffer, bool& timed_out);
     bool read_sectors_split_impl(uint64_t start_sector, uint32_t count,
                                  uint8_t* out_ptr, uint32_t& out_bad_count,
                                  AlignedBuffer& scratch_buf,
-                                 std::function<bool()>& should_stop);
+                                 std::function<bool()>& should_stop,
+                                 int depth);
 
 private:
     DiskHandle& handle_;

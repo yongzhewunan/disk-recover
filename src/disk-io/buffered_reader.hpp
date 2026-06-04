@@ -82,6 +82,14 @@ public:
         raw_reader_.reset_bad_sector_counter();
     }
 
+    // Config accessors
+    const SkipAheadConfig& skip_ahead_config() const {
+        return raw_reader_.skip_ahead_config();
+    }
+    const ReadTimeoutConfig& timeout_config() const {
+        return raw_reader_.timeout_config();
+    }
+
 private:
     bool read_into_buffer(uint64_t start_sector);
 
