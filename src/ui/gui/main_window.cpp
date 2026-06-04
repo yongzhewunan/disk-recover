@@ -137,11 +137,12 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
 
         if (manager_) {
             auto p = manager_->progress();
-            wchar_t text[256];
+            wchar_t text[512];
             _snwprintf_s(text, _TRUNCATE,
-                L"Complete! Found: %u | Recovered: %u | Failed: %u | Size: %s",
+                L"Complete! Found: %u | Recovered: %u | Failed: %u | Size: %s | Bad: %u",
                 p.files_found, p.files_recovered, p.files_failed,
-                FormatFileSize(p.bytes_recovered).c_str());
+                FormatFileSize(p.bytes_recovered).c_str(),
+                p.bad_sectors);
             set_status(text);
         }
         break;
@@ -486,10 +487,11 @@ void MainWindow::update_progress(const ScanAndRecoverManager::Progress& progress
     // would block until the GUI thread processes it, but the GUI thread
     // might be blocked on join() — classic deadlock.
     // We allocate the text on the heap; the GUI thread frees it.
-    wchar_t* text = new wchar_t[256];
-    _snwprintf_s(text, 256, _TRUNCATE,
-        L"Progress: %u%% | Found: %u | Recovered: %u | Failed: %u | Size: %s | Bad: %u",
-        progress.percent, progress.files_found, progress.files_recovered,
+    wchar_t* text = new wchar_t[512];
+    _snwprintf_s(text, 512, _TRUNCATE,
+        L"Progress: %u%% | Sector: %llu | Rate: %.1f MB/s | Found: %u | Recovered: %u | Failed: %u | Size: %s | Bad: %u",
+        progress.percent, progress.current_sector, progress.scan_rate_mbps,
+        progress.files_found, progress.files_recovered,
         progress.files_failed, FormatFileSize(progress.bytes_recovered).c_str(),
         progress.bad_sectors);
     PostMessageW(hwnd_, WM_SETSTATUS, reinterpret_cast<WPARAM>(text), 0);

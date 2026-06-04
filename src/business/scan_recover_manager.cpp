@@ -387,8 +387,10 @@ void ScanAndRecoverManager::worker_thread(Config config) {
 
     uint32_t total_skipped = 0;
     auto last_progress_time = std::chrono::steady_clock::now();
+    const auto scan_start_time = std::chrono::steady_clock::now();
+    const uint32_t sector_size = reader.sector_size();
 
-    auto on_scan_progress = [this, &reader, &total_skipped, &last_progress_time, &config](const ScanProgress& scan_p) {
+    auto on_scan_progress = [this, &reader, &total_skipped, &last_progress_time, &config, &scan_start_time, sector_size](const ScanProgress& scan_p) {
         // Wait if paused
         while (paused_.load() && !stop_requested_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -408,6 +410,14 @@ void ScanAndRecoverManager::worker_thread(Config config) {
             if (progress_.total_sectors > 0) {
                 progress_.percent = static_cast<uint8_t>(
                     100 * progress_.sectors_scanned / progress_.total_sectors);
+            }
+
+            // Calculate scan rate (MB/s)
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - scan_start_time).count();
+            if (elapsed > 0) {
+                double total_mb = static_cast<double>(progress_.sectors_scanned * sector_size) / (1024.0 * 1024.0);
+                progress_.scan_rate_mbps = total_mb / static_cast<double>(elapsed);
             }
         }
 

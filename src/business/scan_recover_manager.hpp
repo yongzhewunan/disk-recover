@@ -30,6 +30,7 @@ public:
         uint32_t bad_sectors = 0;
         uint32_t sectors_skipped = 0;
         uint64_t current_sector = 0;  // Current scanning position for resume
+        double scan_rate_mbps = 0.0;  // Scan rate in MB/s
         uint8_t percent = 0;
         bool is_complete = false;
         bool is_paused = false;
