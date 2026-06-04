@@ -60,7 +60,7 @@ const std::vector<FileSignatures::SignatureEntry>& FileSignatures::entries() {
     return sigs;
 }
 
-// Helper: validate BMP (simple header check)
+// Helper: validate BMP with strict DIB header checks
 static std::optional<MatchResult> validate_bmp(const uint8_t* data, size_t length) {
     if (length < 54) return std::nullopt;
     if (data[0] != 0x42 || data[1] != 0x4D) return std::nullopt;
@@ -75,19 +75,47 @@ static std::optional<MatchResult> validate_bmp(const uint8_t* data, size_t lengt
     if (file_size < 54 || data_offset < 54 || data_offset > file_size) {
         return MatchResult{
             {FileType::Image, L"bmp", L"BMP"},
-            40,  // Low confidence - header present but values suspicious
+            25,  // Low confidence - header present but values suspicious
             MatchFlags::HasHeader | MatchFlags::PartialMatch,
             0
         };
     }
 
-    // Validate BMP dimensions if DIB header is present
-    float evidence = 60.0f;
-    MatchFlags flags = MatchFlags::HasHeader | MatchFlags::DeepValidated;
+    // ── DIB Header Validation ──
+    // BITMAPINFOHEADER starts at offset 14
+    // Bytes 14-17: DIB header size (must be 40 for standard BMP)
+    if (length < 18) {
+        return MatchResult{
+            {FileType::Image, L"bmp", L"BMP"},
+            40,
+            MatchFlags::HasHeader | MatchFlags::PartialMatch,
+            file_size
+        };
+    }
 
-    // Read image dimensions from DIB header (BITMAPINFOHEADER)
-    // Bytes 18-21: width, Bytes 22-25: height
-    if (length >= 26) {
+    uint32_t dib_header_size = data[14] | (data[15] << 8) | (data[16] << 16) | (data[17] << 24);
+
+    // Valid DIB header sizes: 12 (OS/2 BITMAPCOREHEADER), 40 (BITMAPINFOHEADER),
+    // 52, 56, 64, 108, 124 (various extended versions)
+    // Most common is 40
+    bool valid_dib_size = (dib_header_size == 12 || dib_header_size == 40 ||
+                          dib_header_size == 52 || dib_header_size == 56 ||
+                          dib_header_size == 64 || dib_header_size == 108 ||
+                          dib_header_size == 124);
+
+    float evidence = 50.0f;
+    MatchFlags flags = MatchFlags::HasHeader;
+
+    if (!valid_dib_size) {
+        // Unusual DIB header size - reduce confidence
+        evidence -= 15.0f;
+        flags |= MatchFlags::PartialMatch;
+    } else {
+        evidence += 10.0f;  // Good DIB header size
+    }
+
+    // Validate image dimensions and other fields (for standard BITMAPINFOHEADER, size=40)
+    if (length >= 54 && dib_header_size >= 40) {
         int32_t width = static_cast<int32_t>(data[18] | (data[19] << 8) | (data[20] << 16) | (data[21] << 24));
         int32_t height = static_cast<int32_t>(data[22] | (data[23] << 8) | (data[24] << 16) | (data[25] << 24));
 
@@ -96,37 +124,95 @@ static std::optional<MatchResult> validate_bmp(const uint8_t* data, size_t lengt
 
         // Reasonable image dimensions (1 to 65535)
         if (width > 0 && width <= 65535 && abs_height > 0 && abs_height <= 65535) {
-            evidence += 15.0f;  // Good structure evidence
+            evidence += 10.0f;
+        } else {
+            evidence -= 10.0f;
+            flags |= MatchFlags::PartialMatch;
+        }
 
-            // Calculate expected file size from dimensions
-            // Row size is padded to 4-byte boundary
-            uint32_t bytes_per_pixel = 3;  // Default 24-bit
-            // Check bits per pixel at offset 28
-            if (length >= 30) {
-                uint16_t bits_per_pixel = data[28] | (data[29] << 8);
-                if (bits_per_pixel >= 1 && bits_per_pixel <= 32) {
-                    bytes_per_pixel = (bits_per_pixel + 7) / 8;
-                }
+        // ── Planes validation ──
+        // Must be 1 for standard BMP
+        uint16_t planes = data[26] | (data[27] << 8);
+        if (planes == 1) {
+            evidence += 5.0f;
+        } else {
+            evidence -= 10.0f;  // Invalid planes value
+            flags |= MatchFlags::PartialMatch;
+        }
+
+        // ── Bits per pixel validation ──
+        // Valid values: 1, 4, 8, 16, 24, 32
+        uint16_t bits_per_pixel = data[28] | (data[29] << 8);
+        bool valid_bpp = (bits_per_pixel == 1 || bits_per_pixel == 4 ||
+                         bits_per_pixel == 8 || bits_per_pixel == 16 ||
+                         bits_per_pixel == 24 || bits_per_pixel == 32);
+
+        if (valid_bpp) {
+            evidence += 10.0f;
+        } else {
+            evidence -= 15.0f;  // Invalid bits per pixel
+            flags |= MatchFlags::PartialMatch;
+        }
+
+        // ── Compression validation ──
+        // 0=BI_RGB, 1=BI_RLE8, 2=BI_RLE4, 3=BI_BITFIELDS, 4=BI_JPEG, 5=BI_PNG
+        uint32_t compression = data[30] | (data[31] << 8) | (data[32] << 16) | (data[33] << 24);
+        bool valid_compression = (compression <= 5);
+        if (valid_compression) {
+            evidence += 5.0f;
+        } else {
+            evidence -= 15.0f;  // Invalid compression
+            flags |= MatchFlags::PartialMatch;
+        }
+
+        // ── Calculate expected file size for verification ──
+        if (valid_bpp && width > 0 && abs_height > 0) {
+            // Calculate row size (padded to 4-byte boundary)
+            uint32_t row_size;
+            if (bits_per_pixel == 1) {
+                // 1-bit: 8 pixels per byte
+                row_size = ((width + 7) / 8 + 3) / 4 * 4;
+            } else if (bits_per_pixel == 4) {
+                // 4-bit: 2 pixels per byte
+                row_size = ((width + 1) / 2 + 3) / 4 * 4;
+            } else if (bits_per_pixel == 8) {
+                // 8-bit: 1 byte per pixel (or palette index)
+                row_size = (width + 3) / 4 * 4;
+            } else {
+                // 16, 24, 32-bit: bytes_per_pixel * width, padded
+                uint32_t bytes_per_pixel = bits_per_pixel / 8;
+                row_size = (width * bytes_per_pixel + 3) / 4 * 4;
             }
-            uint32_t row_size = ((width * bytes_per_pixel + 3) / 4) * 4;
-            uint32_t expected_data_size = row_size * abs_height;
-            uint32_t expected_file_size = data_offset + expected_data_size;
 
-            // Allow some tolerance for file size (BMP headers vary)
-            // If calculated size is close to declared size, high confidence
-            if (expected_file_size > 0 && file_size > 0) {
+            uint32_t expected_data_size = row_size * abs_height;
+
+            // Add palette size for paletted images
+            uint32_t palette_size = 0;
+            if (bits_per_pixel <= 8) {
+                // Palette has 2^bpp entries, each 4 bytes (RGBQUAD)
+                palette_size = (1 << bits_per_pixel) * 4;
+            }
+
+            uint32_t expected_file_size = 14 + dib_header_size + palette_size + expected_data_size;
+
+            // Allow some tolerance for file size
+            if (file_size > 0 && expected_file_size > 0) {
                 uint32_t diff = (expected_file_size > file_size) ?
                                 (expected_file_size - file_size) : (file_size - expected_file_size);
                 if (diff < file_size / 10) {  // Within 10%
-                    evidence += 10.0f;
+                    evidence += 15.0f;  // Size matches well
+                } else if (diff < file_size / 4) {  // Within 25%
+                    evidence += 5.0f;   // Size somewhat matches
                 }
             }
         }
     }
 
+    flags |= MatchFlags::DeepValidated;
+
     return MatchResult{
         {FileType::Image, L"bmp", L"BMP"},
-        static_cast<uint8_t>(evidence > 100 ? 100 : evidence),
+        static_cast<uint8_t>(evidence > 100 ? 100 : (evidence < 20 ? 20 : evidence)),
         flags,
         file_size  // verified_file_size from BMP header
     };
@@ -200,7 +286,18 @@ std::optional<MatchResult> FileSignatures::match_with_confidence(
     uint8_t b0 = data[0];
 
     // Fast byte-heuristic routing
-    if (b0 == 0xFF) candidates.push_back(validate_jpeg);
+    // IMPORTANT: Use multi-byte patterns to reduce false positives
+
+    // JPEG: Use 3-byte pattern FF D8 FF instead of just FF
+    // FF alone appears in many compressed data streams
+    // A valid JPEG must start with FF D8 followed by another FF (marker)
+    if (b0 == 0xFF) {
+        if (length >= 3 && data[1] == 0xD8 && data[2] == 0xFF) {
+            candidates.push_back(validate_jpeg);
+        }
+        // Otherwise skip - too likely to be random FF in compressed data
+    }
+
     if (b0 == 0x89) candidates.push_back(validate_png);
     if (b0 == 0x47) {
         // GIF vs TS conflict resolution:

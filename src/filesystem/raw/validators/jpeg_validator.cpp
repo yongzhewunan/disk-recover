@@ -186,28 +186,56 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
     }
 
     // Phase 3: Validation decision
-    // Critical: JPEG without SOF is basically unusable
-    if (!found_sof) {
+    // ── STRICT VALIDATION: Require complete marker chain ──
+    // A valid JPEG must have: SOI + SOF + SOS + EOI
+    // Missing any of these significantly reduces confidence
+
+    // Track completeness score (0-4)
+    int completeness = 1;  // SOI is always present (we already checked)
+
+    if (found_sof) {
+        completeness++;
+    } else {
+        // JPEG without SOF is basically unusable
+        evidence *= 0.4f;
+        flags = flags | MatchFlags::PartialMatch;
+    }
+
+    if (found_sos) {
+        completeness++;
+    } else {
+        // JPEG without SOS cannot be decoded
         evidence *= 0.5f;
         flags = flags | MatchFlags::PartialMatch;
     }
 
-    // Critical: JPEG without SOS cannot be decoded
-    if (!found_sos && last_eoi_pos == 0) {
-        // Never entered SOS section - incomplete JPEG
-        evidence *= 0.7f;
+    if (last_eoi_pos > 0) {
+        completeness++;
+        flags = flags | MatchFlags::HasFooter;
+    } else {
+        // JPEG without EOI is incomplete
         flags = flags | MatchFlags::PartialMatch;
     }
 
-    // Critical: JPEG without EOI is incomplete
-    if (last_eoi_pos == 0) {
-        flags = flags | MatchFlags::PartialMatch;
+    // ── Confidence cap based on completeness ──
+    // Only complete JPEGs (4/4) can have high confidence
+    // 3/4: max confidence 60
+    // 2/4: max confidence 40
+    // 1/4: max confidence 25 (likely false positive)
+
+    float max_confidence = 100.0f;
+    if (completeness < 4) {
+        max_confidence = 25.0f + (completeness - 1) * 20.0f;  // 25, 45, 65, 100
     }
 
-    // Minimum threshold: must have SOI marker
-    // For file carving with minimal data, accept SOI + any marker
-    if (evidence < 10.0f) {
-        return std::nullopt;
+    // Apply confidence cap
+    if (evidence > max_confidence) {
+        evidence = max_confidence;
+    }
+
+    // Minimum threshold: must have SOI + at least one marker beyond SOI
+    if (completeness < 2 || evidence < 15.0f) {
+        return std::nullopt;  // Reject - likely false positive
     }
 
     flags = flags | MatchFlags::DeepValidated;

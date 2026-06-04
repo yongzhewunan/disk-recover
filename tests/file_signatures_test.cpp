@@ -4,7 +4,28 @@
 using namespace disk_recover;
 
 TEST(FileSignaturesTest, MatchJpegHeader) {
-    uint8_t data[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10};
+    // Minimal valid JPEG: SOI + APP0(JFIF) + SOF0 + EOI
+    // APP0 (JFIF): FF E0 + length(16) + "JFIF\0" + version + units + density + thumbnail
+    // SOF0: FF C0 + length(11) + precision(8) + height(1) + width(1) + components(1) + sampling
+    uint8_t data[] = {
+        0xFF, 0xD8,   // SOI
+        0xFF, 0xE0,   // APP0 marker
+        0x00, 0x10,   // Length: 16
+        0x4A, 0x46, 0x49, 0x46, 0x00,  // "JFIF\0"
+        0x01, 0x01,   // Version 1.1
+        0x00,         // Units: no units
+        0x00, 0x01,   // X density
+        0x00, 0x01,   // Y density
+        0x00, 0x00,   // No thumbnail
+        0xFF, 0xC0,   // SOF0 marker
+        0x00, 0x0B,   // Length: 11
+        0x08,         // Precision: 8 bits
+        0x00, 0x01,   // Height: 1
+        0x00, 0x01,   // Width: 1
+        0x01,         // Components: 1 (grayscale)
+        0x01, 0x11, 0x00,  // Component: ID=1, sampling=1x1, quant table=0
+        0xFF, 0xD9    // EOI
+    };
     auto sig = FileSignatures::match(data, sizeof(data));
     ASSERT_TRUE(sig.has_value());
     EXPECT_EQ(sig->file_type, FileType::Image);
