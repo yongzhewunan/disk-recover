@@ -45,9 +45,18 @@ void ScanAndRecoverManager::resume() {
 
 void ScanAndRecoverManager::stop() {
     stop_requested_ = true;
+    paused_ = false;  // Unpause so worker can see stop flag and exit
     if (worker_.joinable()) {
         worker_.join();
     }
+}
+
+void ScanAndRecoverManager::stop_request_only() {
+    stop_requested_ = true;
+    paused_ = false;  // Unpause so worker can see stop flag and exit
+    // Do NOT join here — caller must not block (e.g. GUI thread).
+    // The worker will exit on its own and post WM_SCAN_RECOVER_COMPLETE.
+    // Join happens in start() (before spawning new worker) or destructor.
 }
 
 ScanAndRecoverManager::Progress ScanAndRecoverManager::progress() const {

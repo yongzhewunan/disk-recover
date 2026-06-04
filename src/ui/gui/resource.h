@@ -33,3 +33,4 @@
 #define WM_FILE_RECOVERED       (WM_USER + 310)
 #define WM_SCAN_RECOVER_PAUSED  (WM_USER + 311)
 #define WM_SCAN_RECOVER_COMPLETE (WM_USER + 312)
+#define WM_SETSTATUS            (WM_USER + 313)  // wParam = heap-allocated wchar_t* (receiver must delete)

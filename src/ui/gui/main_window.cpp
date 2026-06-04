@@ -111,6 +111,15 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+    case WM_SETSTATUS: {
+        // wp = heap-allocated wchar_t* text (we must delete)
+        auto* text = reinterpret_cast<wchar_t*>(wp);
+        if (text) {
+            set_status(text);
+            delete[] text;
+        }
+        break;
+    }
     case WM_SCAN_RECOVER_PAUSED: {
         state_ = State::Paused;
         SetWindowTextW(h_btn_start_, L"Continue");
@@ -118,6 +127,10 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_SCAN_RECOVER_COMPLETE: {
+        // Worker thread has exited — safe to join and clean up.
+        if (manager_) {
+            manager_->stop();  // This joins the now-exited worker thread (non-blocking)
+        }
         state_ = State::Idle;
         SetWindowTextW(h_btn_start_, L"Start");
         enable_config_controls(true);
@@ -143,7 +156,7 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY:
         if (manager_) {
-            manager_->stop();
+            manager_->stop();  // Full stop with join — window is being destroyed, must block
         }
         PostQuitMessage(0);
         break;
@@ -428,7 +441,13 @@ void MainWindow::on_start_pause() {
 
 void MainWindow::on_stop() {
     if (manager_) {
-        manager_->stop();
+        // Request stop but do NOT join the worker thread here.
+        // join() would block the GUI thread, causing deadlock if the worker
+        // is currently calling SendMessageW (synchronous) from a callback.
+        // The worker will post WM_SCAN_RECOVER_COMPLETE when it exits,
+        // and we handle cleanup there. For a user-initiated stop, we
+        // set state immediately so the UI is responsive.
+        manager_->stop_request_only();
     }
     state_ = State::Idle;
     SetWindowTextW(h_btn_start_, L"Start");
@@ -462,13 +481,18 @@ void MainWindow::on_save_dirs() {
 void MainWindow::update_progress(const ScanAndRecoverManager::Progress& progress) {
     PostMessageW(h_progress_, PBM_SETPOS, progress.percent, 0);
 
-    wchar_t text[256];
-    _snwprintf_s(text, _TRUNCATE,
+    // Use PostMessageW for status text to avoid deadlock:
+    // This callback runs on the worker thread. SendMessageW (synchronous)
+    // would block until the GUI thread processes it, but the GUI thread
+    // might be blocked on join() — classic deadlock.
+    // We allocate the text on the heap; the GUI thread frees it.
+    wchar_t* text = new wchar_t[256];
+    _snwprintf_s(text, 256, _TRUNCATE,
         L"Progress: %u%% | Found: %u | Recovered: %u | Failed: %u | Size: %s | Bad: %u",
         progress.percent, progress.files_found, progress.files_recovered,
         progress.files_failed, FormatFileSize(progress.bytes_recovered).c_str(),
         progress.bad_sectors);
-    set_status(text);
+    PostMessageW(hwnd_, WM_SETSTATUS, reinterpret_cast<WPARAM>(text), 0);
 }
 
 void MainWindow::add_file_to_list(const RecoverableFile& file, const std::wstring& save_path) {

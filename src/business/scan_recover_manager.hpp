@@ -89,7 +89,8 @@ public:
     bool start(const Config& config);
     void pause();
     void resume();
-    void stop();
+    void stop();               // Request stop AND join worker thread (use from non-GUI threads or destructor)
+    void stop_request_only();  // Request stop WITHOUT joining (safe to call from GUI thread)
 
     bool is_running() const { return running_.load(); }
     bool is_paused() const { return paused_.load(); }
