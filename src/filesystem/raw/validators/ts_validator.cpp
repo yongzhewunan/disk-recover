@@ -5,44 +5,93 @@
 namespace disk_recover {
 
 std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
-    // Minimum length for validation
+    // Minimum length for validation (need multiple packets for confidence)
     if (length < 188) return std::nullopt;
 
-    // Phase 1: Sliding sync search (0-2048 bytes)
-    // TS packets are 188 bytes, sync byte is 0x47
-    int best_sync_count = 0;
-    int best_sync_offset = -1;
+    // Phase 0: Detect M2TS vs MTS format
+    // M2TS: 4-byte timestamp prefix before each 188-byte TS packet (192 bytes total)
+    // MTS:  Standard 188-byte TS packets
+    bool is_m2ts = false;
+    int sync_offset = 0;
+    int packet_size = 188;
 
-    // Search window: 0 to 2048 bytes (allows for offset alignment)
-    int max_search_offset = length >= 2048 + 564 ? 2048 : static_cast<int>(length - 564);
-    if (max_search_offset < 0) max_search_offset = 0;
-
-    for (int offset = 0; offset <= max_search_offset; ++offset) {
-        int sync_count = 0;
-
-        // Check for sync bytes at 188-byte intervals
-        for (int packet = 0; packet < 3 && offset + packet * 188 + 188 <= length; ++packet) {
-            if (data[offset + packet * 188] == 0x47) {
-                ++sync_count;
+    // Check for M2TS pattern: 4-byte timestamp + 0x47 sync at offset 4
+    // Need at least 2 packets to confirm pattern
+    if (length >= 384) {
+        // M2TS pattern: data[4] == 0x47, data[196] == 0x47 (192-byte intervals)
+        if (data[4] == 0x47 && data[196] == 0x47) {
+            // Verify it's not a false positive by checking one more packet
+            if (length >= 576 && data[388] == 0x47) {
+                is_m2ts = true;
+                sync_offset = 4;
+                packet_size = 192;
+            } else if (data[196] == 0x47) {
+                // Two packets match M2TS pattern - likely M2TS
+                is_m2ts = true;
+                sync_offset = 4;
+                packet_size = 192;
             }
         }
-
-        if (sync_count > best_sync_count) {
-            best_sync_count = sync_count;
-            best_sync_offset = offset;
-        }
-
-        // Early exit if we found 3 syncs
-        if (best_sync_count == 3) break;
     }
 
-    // Need at least 2 syncs for reasonable confidence
-    if (best_sync_count < 2) {
-        // Single sync - weak signal, but may be valid for short streams
-        if (length >= 188 && data[0] == 0x47) {
+    // Phase 1: Enhanced sliding sync search
+    // For MTS (not M2TS), search for best sync offset
+    int best_sync_count = 0;
+    int best_sync_offset = sync_offset;
+
+    if (!is_m2ts) {
+        // For MTS, search window: 0 to 2048 bytes
+        int max_search_offset = length >= 2048 + 564 ? 2048 : static_cast<int>(length - 564);
+        if (max_search_offset < 0) max_search_offset = 0;
+
+        for (int offset = 0; offset <= max_search_offset; ++offset) {
+            int sync_count = 0;
+
+            // Check for sync bytes at 188-byte intervals
+            for (int packet = 0; packet < 3 && offset + packet * 188 + 188 <= length; ++packet) {
+                if (data[offset + packet * 188] == 0x47) {
+                    ++sync_count;
+                }
+            }
+
+            if (sync_count > best_sync_count) {
+                best_sync_count = sync_count;
+                best_sync_offset = offset;
+            }
+
+            // Early exit if we found 3 syncs
+            if (best_sync_count == 3) break;
+        }
+    } else {
+        // For M2TS, count syncs at 192-byte intervals starting at offset 4
+        for (int packet = 0; packet < 10 && sync_offset + packet * packet_size < static_cast<int>(length); ++packet) {
+            if (data[sync_offset + packet * packet_size] == 0x47) {
+                ++best_sync_count;
+            }
+        }
+    }
+
+    // Phase 2: Enhanced periodicity check (5-10 packets for high confidence)
+    // This is critical for distinguishing TS from random data
+    constexpr int MIN_PACKETS_FOR_HIGH_CONFIDENCE = 5;
+    constexpr int MAX_PACKETS_TO_SCAN = 10;
+
+    int sync_count_extended = 0;
+    for (int packet = 0; packet < MAX_PACKETS_TO_SCAN; ++packet) {
+        size_t pos = best_sync_offset + packet * packet_size;
+        if (pos >= length) break;
+        if (data[pos] == 0x47) {
+            ++sync_count_extended;
+        }
+    }
+
+    // Require minimum sync count for acceptance
+    if (sync_count_extended < 2) {
+        // Single sync - weak signal, may be false positive
+        if (length >= 188 && data[0] == 0x47 && sync_count_extended == 1) {
             return MatchResult{
                 {FileType::Video, L"mts", L"MPEG-TS"},
-                30,  // Low confidence
+                25,  // Low confidence
                 MatchFlags::HasHeader | MatchFlags::PartialMatch
             };
         }
@@ -52,19 +101,22 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
     float evidence = TS_WEIGHTS.header_weight;
     MatchFlags flags = MatchFlags::HasHeader;
 
-    // Phase 2: Continuity counter validation (stronger evidence)
+    // Phase 3: Continuity counter validation (stronger evidence)
     int valid_packets = 0;
     int last_pid = -1;
     int last_continuity = -1;
 
-    for (int packet = 0; packet < best_sync_count; ++packet) {
-        size_t pos = best_sync_offset + packet * 188;
+    int packets_to_validate = (std::min)(sync_count_extended, MAX_PACKETS_TO_SCAN);
+    for (int packet = 0; packet < packets_to_validate; ++packet) {
+        size_t pos = best_sync_offset + packet * packet_size;
 
         // TS header structure:
         // Byte 0: sync (0x47)
         // Byte 1: error_indicator(1) + payload_start(1) + PID_high(5)
         // Byte 2: PID_low(8)
         // Byte 3: scrambling(2) + adaptation(2) + continuity(4)
+
+        if (pos + 4 > length) break;
 
         uint8_t byte1 = data[pos + 1];
         uint8_t byte2 = data[pos + 2];
@@ -121,29 +173,39 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
         ++valid_packets;
     }
 
-    // Phase 3: Calculate confidence
-    // Sync count evidence
-    if (best_sync_count == 3) {
-        evidence += 20.0f;
-    } else if (best_sync_count == 2) {
-        evidence += 10.0f;
+    // Phase 4: Calculate confidence with enhanced periodicity evidence
+    // Sync count evidence - higher bar for high confidence
+    if (sync_count_extended >= MIN_PACKETS_FOR_HIGH_CONFIDENCE) {
+        evidence += 25.0f;
+        flags |= MatchFlags::DeepValidated;
+    } else if (sync_count_extended >= 3) {
+        evidence += 15.0f;
+    } else if (sync_count_extended >= 2) {
+        evidence += 8.0f;
     }
 
     // Valid packet evidence
-    if (valid_packets == best_sync_count) {
+    if (valid_packets == sync_count_extended) {
         evidence += TS_WEIGHTS.container_weight;
         flags = flags | MatchFlags::ContainerParsed;
     } else if (valid_packets >= 2) {
         evidence += TS_WEIGHTS.container_weight * 0.5f;
     }
 
-    flags = flags | MatchFlags::DeepValidated;
-
-    return MatchResult{
-        {FileType::Video, L"mts", L"MPEG-TS/AVCHD"},
-        normalize_confidence(evidence, TS_WEIGHTS),
-        flags
-    };
+    // Return appropriate extension based on format
+    if (is_m2ts) {
+        return MatchResult{
+            {FileType::Video, L"m2ts", L"Blu-ray M2TS"},
+            normalize_confidence(evidence, TS_WEIGHTS),
+            flags
+        };
+    } else {
+        return MatchResult{
+            {FileType::Video, L"mts", L"MPEG-TS/AVCHD"},
+            normalize_confidence(evidence, TS_WEIGHTS),
+            flags
+        };
+    }
 }
 
 } // namespace disk_recover

@@ -91,7 +91,22 @@ bool find_string_limited(const uint8_t* data, size_t length,
 } // anonymous namespace
 
 std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length) {
-    // Phase 1: TIFF header validation
+    // Phase 0: Check for ORF signature (IIRO = 49 49 52 4F)
+    // Olympus ORF files use a different magic number
+    if (length >= 8 && data[0] == 0x49 && data[1] == 0x49 &&
+        data[2] == 0x52 && data[3] == 0x4F) {
+        // ORF header: IIRO + version + IFD offset
+        uint32_t ifd_offset = read_le32(data + 4);
+        if (ifd_offset >= 8 && ifd_offset < length) {
+            return MatchResult{
+                {FileType::Image, L"orf", L"Olympus ORF"},
+                95,
+                MatchFlags::HasHeader | MatchFlags::DeepValidated
+            };
+        }
+    }
+
+    // Phase 1: Standard TIFF header validation
     if (length < 8) return std::nullopt;
 
     bool le = false;  // Little-endian
@@ -105,9 +120,21 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
         return std::nullopt;
     }
 
-    // Validate magic number 42
+    // Validate magic number 42 (or 0x55 for Panasonic RW2)
     uint16_t magic = rd16(data + 2, le);
-    if (magic != 42) return std::nullopt;
+    if (magic != 42 && magic != 0x55) return std::nullopt;
+
+    // Check for Panasonic RW2 (magic 0x55)
+    if (magic == 0x55) {
+        uint32_t ifd_offset = rd32(data + 4, le);
+        if (ifd_offset >= 8 && ifd_offset < length) {
+            return MatchResult{
+                {FileType::Image, L"rw2", L"Panasonic RW2"},
+                95,
+                MatchFlags::HasHeader | MatchFlags::DeepValidated
+            };
+        }
+    }
 
     // Validate IFD offset
     uint32_t ifd_offset = rd32(data + 4, le);
@@ -128,7 +155,11 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
         };
     }
 
-    // Phase 3: IFD tag scanning (primary evidence)
+    // Phase 3: IFD tag scanning (primary evidence for vendor detection)
+    // This is the DEFINITIVE method - check tags BEFORE string search
+    std::wstring ext = L"tiff";
+    std::wstring desc = le ? L"TIFF-LE" : L"TIFF-BE";
+
     if (ifd_offset + 2 <= length) {
         uint16_t count = rd16(data + ifd_offset, le);
 
@@ -137,7 +168,7 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
             evidence += TIFF_WEIGHTS.structure_weight;
             flags = flags | MatchFlags::DeepValidated;
 
-            // Scan for specific tags
+            // Scan for specific tags in priority order
             for (uint16_t i = 0; i < count; ++i) {
                 const uint8_t* entry = data + ifd_offset + 2 + 12 * i;
                 uint16_t tag = rd16(entry, le);
@@ -151,22 +182,60 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                     };
                 }
 
-                // MakerNote tag (37500) - strong vendor evidence
+                // MakerNote tag (37500) - check for vendor signature
                 if (tag == 37500) {
-                    // Get MakerNote offset
                     uint16_t type = rd16(entry + 2, le);
-                    uint32_t count = rd32(entry + 4, le);
-                    uint32_t offset;
+                    uint32_t mn_count = rd32(entry + 4, le);
+                    uint32_t offset = rd32(entry + 8, le);
 
-                    if (type == 7 && count > 0) {  // UNDEFINED type
-                        offset = rd32(entry + 8, le);
-                    } else {
-                        offset = rd32(entry + 8, le);
-                    }
+                    if (offset < length && mn_count > 0) {
+                        // Check MakerNote content for vendor signature
+                        // Priority: Direct signature check > structure validation
 
-                    // Validate MakerNote structure
-                    if (offset < length && validate_makernote_structure(data, length, offset, le)) {
-                        evidence += 25.0f;  // Strong container evidence
+                        // Nikon: "Nikon\x00" or "Nikon" + IFD
+                        if (offset + 6 <= length &&
+                            std::memcmp(data + offset, "Nikon", 5) == 0) {
+                            return MatchResult{
+                                {FileType::Image, L"nef", L"Nikon NEF"},
+                                96,
+                                flags | MatchFlags::ContainerParsed
+                            };
+                        }
+
+                        // Sony: "SONY DSC " or "SONY"
+                        if (offset + 4 <= length &&
+                            std::memcmp(data + offset, "SONY", 4) == 0) {
+                            return MatchResult{
+                                {FileType::Image, L"arw", L"Sony ARW"},
+                                96,
+                                flags | MatchFlags::ContainerParsed
+                            };
+                        }
+
+                        // Panasonic: "Panasonic"
+                        if (offset + 9 <= length &&
+                            std::memcmp(data + offset, "Panasonic", 9) == 0) {
+                            return MatchResult{
+                                {FileType::Image, L"rw2", L"Panasonic RW2"},
+                                96,
+                                flags | MatchFlags::ContainerParsed
+                            };
+                        }
+
+                        // Olympus: "OLYMP" or "OLYMPUS"
+                        if (offset + 5 <= length &&
+                            std::memcmp(data + offset, "OLYMP", 5) == 0) {
+                            return MatchResult{
+                                {FileType::Image, L"orf", L"Olympus ORF"},
+                                96,
+                                flags | MatchFlags::ContainerParsed
+                            };
+                        }
+
+                        // Valid MakerNote structure but no vendor match
+                        if (validate_makernote_structure(data, length, offset, le)) {
+                            evidence += 25.0f;
+                        }
                     }
                 }
 
@@ -188,8 +257,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
         }
     }
 
-    // Phase 4: String search ONLY as weak signal (< 15 points)
-    // Only perform if no strong IFD evidence found
+    // Phase 4: String search as FALLBACK only
+    // Only used if IFD tag scanning didn't find vendor
     if (evidence < TIFF_WEIGHTS.header_weight + 30.0f) {
         size_t search_len = length < 1024 ? length : 1024;
 
@@ -205,12 +274,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
         }
     }
 
-    // Determine vendor from evidence
-    std::wstring ext = L"tiff";
-    std::wstring desc = le ? L"TIFF-LE" : L"TIFF-BE";
-
-    if (evidence >= TIFF_WEIGHTS.header_weight + 30.0f) {
-        // Vendor detected - determine which one
+    // Determine vendor from string search (fallback)
+    if (ext == L"tiff" && evidence >= TIFF_WEIGHTS.header_weight + 30.0f) {
         size_t search_len = length < 1024 ? length : 1024;
 
         if (find_string_limited(data, length, "Nikon", 5, search_len)) {

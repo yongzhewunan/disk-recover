@@ -156,8 +156,23 @@ std::optional<MatchResult> FileSignatures::match_with_confidence(
     if (b0 == 0xFF) candidates.push_back(validate_jpeg);
     if (b0 == 0x89) candidates.push_back(validate_png);
     if (b0 == 0x47) {
-        candidates.push_back(validate_gif);
-        candidates.push_back(validate_ts);  // Conflict: GIF vs TS both start with 0x47
+        // GIF vs TS conflict resolution:
+        // Both start with 0x47, but GIF has full signature "GIF8"
+        // GIF typically wins with higher confidence from signature match
+        // Strategy: Run GIF first, only add TS if GIF doesn't strongly match
+
+        auto gif_result = validate_gif(data, length);
+        if (gif_result && gif_result->confidence >= 80) {
+            // GIF89a or GIF87a with full structure - very likely GIF
+            candidates.push_back(validate_gif);
+        } else {
+            // GIF didn't strongly match - try both
+            candidates.push_back(validate_gif);
+            // TS requires enough data for packet validation (at least 2 packets)
+            if (length >= 376) {
+                candidates.push_back(validate_ts);
+            }
+        }
     }
     if (b0 == 0x49 || b0 == 0x4D) candidates.push_back(validate_tiff_raw);
     if (b0 == 0x42) candidates.push_back(validate_bmp);
@@ -167,14 +182,24 @@ std::optional<MatchResult> FileSignatures::match_with_confidence(
     if (b0 == 0x46) candidates.push_back(validate_flv);   // 'F' for FLV
 
     // Pattern probe for BMFF (ftyp not at byte 0)
+    // BMFF containers have size field at bytes 0-3, then 'ftyp'/'moov' at 4-7
     if (length >= 12) {
-        // Check for 'ftyp' at offset 4 (standard position)
-        if (data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70) {
-            candidates.push_back(validate_bmff);
-        }
-        // Also check for 'moov' box (some raw MOV files)
-        if (data[4] == 0x6D && data[5] == 0x6F && data[6] == 0x6F && data[7] == 0x76) {
-            candidates.push_back(validate_bmff);
+        // Validate box size is reasonable before accepting BMFF candidate
+        uint32_t box_size = (uint32_t(data[0]) << 24) |
+                            (uint32_t(data[1]) << 16) |
+                            (uint32_t(data[2]) << 8)  |
+                            uint32_t(data[3]);
+
+        // Box size should be at least 8 (header size) and reasonable (< 32MB for header)
+        if (box_size >= 8 && box_size <= 32 * 1024 * 1024) {
+            // Check for 'ftyp' at offset 4 (standard position)
+            if (data[4] == 0x66 && data[5] == 0x74 && data[6] == 0x79 && data[7] == 0x70) {
+                candidates.push_back(validate_bmff);
+            }
+            // Also check for 'moov' box (some raw MOV files)
+            if (data[4] == 0x6D && data[5] == 0x6F && data[6] == 0x6F && data[7] == 0x76) {
+                candidates.push_back(validate_bmff);
+            }
         }
     }
 

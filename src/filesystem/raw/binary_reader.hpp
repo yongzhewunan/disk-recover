@@ -44,6 +44,50 @@ inline uint64_t read_be64(const uint8_t* p) {
         uint64_t(p[7]);
 }
 
+// ============================================================================
+// Safe memory access with bounds checking
+// Returns default value if offset is out of bounds
+// ============================================================================
+
+inline uint16_t read_le16_safe(const uint8_t* data, size_t length, size_t offset, uint16_t default_val = 0) {
+    if (offset + 2 > length) return default_val;
+    return read_le16(data + offset);
+}
+
+inline uint32_t read_le32_safe(const uint8_t* data, size_t length, size_t offset, uint32_t default_val = 0) {
+    if (offset + 4 > length) return default_val;
+    return read_le32(data + offset);
+}
+
+inline uint16_t read_be16_safe(const uint8_t* data, size_t length, size_t offset, uint16_t default_val = 0) {
+    if (offset + 2 > length) return default_val;
+    return read_be16(data + offset);
+}
+
+inline uint32_t read_be32_safe(const uint8_t* data, size_t length, size_t offset, uint32_t default_val = 0) {
+    if (offset + 4 > length) return default_val;
+    return read_be32(data + offset);
+}
+
+inline uint64_t read_be64_safe(const uint8_t* data, size_t length, size_t offset, uint64_t default_val = 0) {
+    if (offset + 8 > length) return default_val;
+    return read_be64(data + offset);
+}
+
+inline uint64_t read_le64_safe(const uint8_t* data, size_t length, size_t offset, uint64_t default_val = 0) {
+    if (offset + 8 > length) return default_val;
+    const uint8_t* p = data + offset;
+    return
+        uint64_t(p[0]) |
+        (uint64_t(p[1]) << 8) |
+        (uint64_t(p[2]) << 16) |
+        (uint64_t(p[3]) << 24) |
+        (uint64_t(p[4]) << 32) |
+        (uint64_t(p[5]) << 40) |
+        (uint64_t(p[6]) << 48) |
+        (uint64_t(p[7]) << 56);
+}
+
 inline bool has_bytes(
     const uint8_t* data,
     size_t length,

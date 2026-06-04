@@ -50,6 +50,7 @@ struct MatchResult {
     FileSignature signature;
     uint8_t confidence = 0;      // 0-100 scale, normalized across formats
     MatchFlags flags = MatchFlags::None;
+    uint64_t verified_file_size = 0;  // Exact file bounds when determinable (0 = unknown)
 };
 
 class FileSignatures {

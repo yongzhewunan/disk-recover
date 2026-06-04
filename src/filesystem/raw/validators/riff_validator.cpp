@@ -14,11 +14,24 @@ std::optional<MatchResult> validate_riff(const uint8_t* data, size_t length) {
     float evidence = RIFF_WEIGHTS.header_weight;
     MatchFlags flags = MatchFlags::HasHeader;
 
-    // Get file size
-    uint32_t file_size = read_le32(data + 4);
-    if (file_size < 4 || file_size > length - 8) {
-        // Size mismatch - may be truncated or corrupted
+    // Get file size from RIFF header (bytes 4-7)
+    // Note: RIFF size field does NOT include the first 8 bytes (RIFF + size)
+    // So actual file size = file_size + 8
+    uint32_t riff_size = read_le32(data + 4);
+    uint64_t verified_file_size = 0;
+
+    if (riff_size < 4) {
+        // Invalid size
         flags = flags | MatchFlags::PartialMatch;
+    } else {
+        // Calculate actual file size
+        verified_file_size = static_cast<uint64_t>(riff_size) + 8;
+
+        // Check if size matches available data
+        if (riff_size > length - 8) {
+            // File is truncated - may still be recoverable
+            flags = flags | MatchFlags::PartialMatch;
+        }
     }
 
     // Phase 2: Determine container type
@@ -39,7 +52,8 @@ std::optional<MatchResult> validate_riff(const uint8_t* data, size_t length) {
         return MatchResult{
             {FileType::Image, L"webp", L"WebP"},
             normalize_confidence(evidence, RIFF_WEIGHTS),
-            flags
+            flags,
+            verified_file_size
         };
     }
 
@@ -63,7 +77,8 @@ std::optional<MatchResult> validate_riff(const uint8_t* data, size_t length) {
         return MatchResult{
             {FileType::Video, L"avi", L"AVI"},
             normalize_confidence(evidence, RIFF_WEIGHTS),
-            flags
+            flags,
+            verified_file_size
         };
     }
 
@@ -83,7 +98,8 @@ std::optional<MatchResult> validate_riff(const uint8_t* data, size_t length) {
         return MatchResult{
             {FileType::Video, L"wav", L"WAV"},
             normalize_confidence(evidence, RIFF_WEIGHTS),
-            flags
+            flags,
+            verified_file_size
         };
     }
 
@@ -93,7 +109,8 @@ std::optional<MatchResult> validate_riff(const uint8_t* data, size_t length) {
     return MatchResult{
         {FileType::Video, L"riff", L"RIFF"},
         normalize_confidence(evidence, RIFF_WEIGHTS),
-        flags
+        flags,
+        verified_file_size
     };
 }
 
