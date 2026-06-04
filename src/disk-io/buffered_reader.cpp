@@ -27,9 +27,10 @@ bool BufferedSectorReader::read_into_buffer(uint64_t start_sector) {
         uint32_t to_read = (std::min)(CHUNK_SECTORS, total_sectors - sectors_read);
         uint8_t* dst = buffer_.data() + static_cast<size_t>(sectors_read) * sector_size_;
 
-        // Use raw_reader_ which has timeout control
+        // Use read_sectors_split with timeout for each chunk
         AlignedBuffer chunk_buf(to_read * sector_size_, sector_size_);
-        if (!raw_reader_.read_sectors(chunk_start, to_read, chunk_buf)) {
+        uint32_t bad_count = 0, skip_ahead = 0;
+        if (!raw_reader_.read_sectors_split(chunk_start, to_read, chunk_buf, bad_count, skip_ahead, nullptr)) {
             // Failed/timeout - fill remaining with zeros and stop
             size_t remaining = static_cast<size_t>(total_sectors - sectors_read) * sector_size_;
             memset(dst, 0, remaining);
