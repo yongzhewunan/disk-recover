@@ -93,7 +93,7 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
 
         // EOI (End of Image) - standalone marker
         if (marker == 0xD9) {
-            last_eoi_pos = pos;  // Position after FF D9
+            last_eoi_pos = pos + 1;  // Position after FF D9 (pos already incremented past marker)
             evidence += JPEG_WEIGHTS.footer_weight;
             flags = flags | MatchFlags::HasFooter;
             break;
@@ -212,11 +212,21 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
 
     flags = flags | MatchFlags::DeepValidated;
 
+    // Only return verified_file_size if we found a reasonable EOI position
+    // If input data is too short (< 2KB) or EOI is at a suspicious position,
+    // return 0 to let the scanner estimate size by other means
+    uint64_t verified_size = 0;
+    if (last_eoi_pos >= 64 && last_eoi_pos <= length) {
+        // EOI found at a reasonable position
+        verified_size = last_eoi_pos;
+    }
+    // Otherwise return 0 - let parse_file_size() or footer search handle it
+
     return MatchResult{
         {FileType::Image, L"jpg", L"JPEG"},
         normalize_confidence(evidence, JPEG_WEIGHTS),
         flags,
-        last_eoi_pos  // verified_file_size: exact EOI position
+        verified_size
     };
 }
 
