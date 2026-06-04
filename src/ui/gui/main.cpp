@@ -1,28 +1,16 @@
-// Main entry point for disk-recover GUI application
-// disk-recover - Windows Disk Data Recovery Software
-
 #include "main_window.hpp"
 
-#include <windows.h>
-
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
-    // Suppress unused parameter warnings
-    (void)hPrevInstance;
-    (void)lpCmdLine;
-
-    // Create and run main window
-    disk_recover::gui::MainWindow mainWindow;
-
-    if (!mainWindow.RegisterClass(hInstance)) {
-        MessageBoxW(nullptr, L"Failed to register window class", L"Error", MB_OK | MB_ICONERROR);
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+    disk_recover::MainWindow win;
+    if (!win.create(hInst)) {
         return 1;
     }
+    win.show(nCmdShow);
 
-    if (!mainWindow.Create(hInstance, nCmdShow)) {
-        MessageBoxW(nullptr, L"Failed to create main window", L"Error", MB_OK | MB_ICONERROR);
-        return 1;
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
-
-    mainWindow.RunMessageLoop();
-    return 0;
+    return static_cast<int>(msg.wParam);
 }

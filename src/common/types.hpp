@@ -24,6 +24,20 @@ enum class BadSectorPolicy : uint8_t {
     ForceRead = 2,
 };
 
+// Skip-ahead configuration for adaptive bad sector handling
+struct SkipAheadConfig {
+    uint32_t consecutive_bad_threshold = 4;   // Skip after N consecutive bad batches
+    uint64_t skip_distance_sectors = 1024;    // How many sectors to skip (default 512KB)
+    bool enabled = true;
+};
+
+// Read timeout configuration
+struct ReadTimeoutConfig {
+    uint32_t timeout_ms = 5000;               // Timeout per read operation (ms)
+    uint32_t retry_count = 3;                 // Retries before marking as bad
+    bool enabled = false;                     // Timeout feature toggle
+};
+
 struct DiskExtent {
     uint64_t start_sector;
     uint64_t sector_count;

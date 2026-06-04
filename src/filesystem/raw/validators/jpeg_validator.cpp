@@ -20,7 +20,7 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
     bool found_sof = false;
     bool found_eoi = false;
 
-    while (pos + 4 < length && pos < scan_limit) {
+    while (pos + 2 <= length && pos < scan_limit) {
         if (data[pos] != 0xFF) break;
 
         // Skip stuffing bytes (FF FF sequences)
@@ -29,7 +29,7 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
 
         uint8_t marker = data[pos++];
 
-        // EOI (End of Image)
+        // EOI (End of Image) - standalone marker, no length
         if (marker == 0xD9) {
             found_eoi = true;
             evidence += JPEG_WEIGHTS.footer_weight;
@@ -37,48 +37,13 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
             break;
         }
 
-        // SOS (Start of Scan)
-        if (marker == 0xDA) {
-            found_sos = true;
-            evidence += 15.0f;
-
-            if (pos + 2 > length) break;
-            uint16_t seg_len = read_be16(data + pos);
-            if (seg_len < 2) break;
-
-            pos += seg_len;
-
-            // Scan for EOI in scan data
-            while (pos + 2 <= length) {
-                if (data[pos] == 0xFF) {
-                    uint8_t next = data[pos + 1];
-                    if (next == 0x00) {
-                        pos += 2;
-                        continue;
-                    }
-                    if (next == 0xD9) {
-                        found_eoi = true;
-                        evidence += JPEG_WEIGHTS.footer_weight;
-                        flags = flags | MatchFlags::HasFooter;
-                        break;
-                    }
-                    if (next >= 0xD0 && next <= 0xD7) {
-                        pos += 2;
-                        continue;
-                    }
-                    break;
-                }
-                ++pos;
-            }
-            break;
-        }
-
-        // TEM (Temporary)
+        // TEM (Temporary) - standalone marker
         if (marker == 0x01) continue;
 
-        // RSTn (Restart) markers
+        // RSTn (Restart) markers - standalone
         if (marker >= 0xD0 && marker <= 0xD7) continue;
 
+        // All other markers have a 2-byte length field
         if (pos + 2 > length) break;
 
         uint16_t seg_len = read_be16(data + pos);
@@ -156,8 +121,9 @@ std::optional<MatchResult> validate_jpeg(const uint8_t* data, size_t length) {
         flags = flags | MatchFlags::PartialMatch;
     }
 
-    // Minimum threshold: must have SOI + SOF + SOS
-    if (!found_sof && !found_sos && evidence < 30.0f) {
+    // Minimum threshold: must have SOI marker
+    // For file carving with minimal data, accept SOI + any marker
+    if (evidence < 10.0f) {
         return std::nullopt;
     }
 

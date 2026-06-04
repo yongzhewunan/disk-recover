@@ -1,165 +1,81 @@
 #pragma once
-
 #include <windows.h>
 #include <commctrl.h>
 #include <string>
 #include <vector>
-#include <memory>
+#include <thread>
 #include <atomic>
-
 #include "resource.h"
+#include "disk-io/disk_handle.hpp"
 #include "disk-io/disk_info.hpp"
-#include "business/scan_manager.hpp"
-#include "business/recovery_manager.hpp"
-#include "business/preview_manager.hpp"
+#include "disk-io/buffered_reader.hpp"
+#include "filesystem/raw/signature_scanner.hpp"
 #include "common/types.hpp"
+#include "business/scan_cache_db.hpp"
+#include "business/scan_recover_manager.hpp"
 
-namespace disk_recover::gui {
+namespace disk_recover {
 
 class MainWindow {
 public:
-    MainWindow() = default;
+    MainWindow();
     ~MainWindow();
 
-    // Non-copyable, non-movable
-    MainWindow(const MainWindow&) = delete;
-    MainWindow& operator=(const MainWindow&) = delete;
-    MainWindow(MainWindow&&) = delete;
-    MainWindow& operator=(MainWindow&&) = delete;
-
-    /// Register the window class (call once per process)
-    /// @param hInst Application instance handle
-    /// @return true on success
-    bool RegisterClass(HINSTANCE hInst);
-
-    /// Create and show the main window
-    /// @param hInst Application instance handle
-    /// @param cmdShow Initial show state (SW_SHOWDEFAULT, etc.)
-    /// @return true on success
-    bool Create(HINSTANCE hInst, int cmdShow);
-
-    /// Run the message loop (blocks until window is closed)
-    void RunMessageLoop();
-
-    /// Get the window handle
-    HWND GetHwnd() const noexcept { return hwnd_; }
-
-    /// Window procedure (static callback)
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    bool create(HINSTANCE hInst);
+    void show(int nCmdShow);
 
 private:
-    HWND hwnd_ = nullptr;           // Main window handle
-    HINSTANCE hInst_ = nullptr;     // Instance handle
+    static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp);
+    LRESULT handle_message(UINT msg, WPARAM wp, LPARAM lp);
 
-    // Child control handles
-    HWND hDiskLabel_ = nullptr;         // "Disk:" label
-    HWND hDiskList_ = nullptr;          // ComboBox for disk selection
-    HWND hPartitionLabel_ = nullptr;    // "Partition:" label
-    HWND hPartitionList_ = nullptr;     // ComboBox for partition selection
-    HWND hScanBtn_ = nullptr;           // Scan button
-    HWND hPauseBtn_ = nullptr;          // Pause/Resume button
-    HWND hRecoverBtn_ = nullptr;        // Recover button
-    HWND hStopBtn_ = nullptr;           // Stop button
-    HWND hFileList_ = nullptr;          // ListView for recoverable files
-    HWND hPreviewLabel_ = nullptr;      // "Preview:" label
-    HWND hPreview_ = nullptr;           // Static control for preview image
-    HWND hStatusBar_ = nullptr;         // Status bar
-    HWND hProgressBar_ = nullptr;       // Progress bar (embedded in status bar)
+    // UI creation
+    void create_controls();
+    void refresh_drive_list();
 
-    // Configuration controls
-    HWND hScanModeCombo_ = nullptr;         // ComboBox for scan mode
-    HWND hScanImagesCheck_ = nullptr;       // Checkbox for image filter
-    HWND hScanVideosCheck_ = nullptr;       // Checkbox for video filter
-    HWND hBadSectorCombo_ = nullptr;        // ComboBox for bad sector policy
-    HWND hBadSectorPanel_ = nullptr;        // Panel for bad sector info
-    HWND hBadSectorCount_ = nullptr;        // Static text for bad sector count
+    // Event handlers
+    void on_scan();
+    void on_recover();
+    void on_scan_recover();
+    void on_stop();
+    void on_browse_output();
 
-    // Business logic managers
-    std::unique_ptr<ScanManager> scanManager_;
-    std::unique_ptr<RecoveryManager> recoverManager_;
-    std::unique_ptr<business::PreviewManager> previewManager_;
+    // Scan/Recover operations
+    void do_scan();
+    void do_scan_recover();
+    void stop_operation();
 
-    // Disk information cache
-    std::vector<DiskInfo> cachedDisks_;
-    std::vector<RecoverableFile> foundFiles_;  // Files found during scan
-    uint32_t badSectorsCount_ = 0;  // Bad sectors detected during scan
+    // UI update helpers
+    void update_progress(const ScanProgress& progress);
+    void add_file_to_list(const RecoverableFile& file);
+    void set_status(const std::wstring& text);
+    void enable_buttons(bool scanning);
 
-    // ListView column indices
-    enum { COL_NAME = 0, COL_SIZE = 1, COL_TYPE = 2, COL_STATUS = 3, COL_PATH = 4 };
+    // Window handle
+    HWND hwnd_ = nullptr;
+    HINSTANCE hInst_ = nullptr;
 
-    // Layout constants
-    static constexpr int MARGIN = 8;
-    static constexpr int CONTROL_HEIGHT = 24;
-    static constexpr int BUTTON_WIDTH = 80;
-    static constexpr int COMBO_WIDTH = 300;
-    static constexpr int PREVIEW_WIDTH = 220;
-    static constexpr int STATUSBAR_HEIGHT = 24;
-    static constexpr int DISK_LABEL_W = 45;     // "Disk:" label width
-    static constexpr int PART_LABEL_W = 70;      // "Partition:" label width
+    // Controls
+    HWND h_combo_drives_ = nullptr;
+    HWND h_btn_scan_ = nullptr;
+    HWND h_btn_recover_ = nullptr;
+    HWND h_btn_scan_recover_ = nullptr;
+    HWND h_btn_stop_ = nullptr;
+    HWND h_list_files_ = nullptr;
+    HWND h_status_bar_ = nullptr;
+    HWND h_progress_ = nullptr;
+    HWND h_ed_output_ = nullptr;
+    HWND h_btn_browse_ = nullptr;
 
-    // Custom message for thread-safe UI updates
-    static constexpr UINT WM_SCAN_PROGRESS = WM_USER + 1;
-    static constexpr UINT WM_SCAN_COMPLETE = WM_USER + 2;
+    // State
+    std::vector<DiskInfo> drives_;
+    std::vector<RecoverableFile> found_files_;
+    std::wstring output_dir_;
+    std::thread worker_thread_;
+    std::atomic<bool> stop_flag_{false};
+    bool is_scanning_ = false;
 
-    // Batch update tracking
-    uint32_t lastDisplayedFileCount_ = 0;  // Files already shown in ListView
-
-    // Resume tracking
-    std::string lastSessionId_;
-    std::wstring lastDbPath_;
-
-    // Recovery state tracking
-    bool recovering_ = false;
-
-    // Window lifetime tracking for safe PostMessage
-    std::shared_ptr<std::atomic<bool>> windowAlive_;
-
-    // Message handlers
-    void OnCreate();
-    void OnSize(int cx, int cy);
-    void OnCommand(int id, int notifyCode, HWND hCtrl);
-    void OnDestroy();
-    void OnNotify(LPNMHDR nmhdr);
-    void OnScanProgress(const ScanProgress& progress);
-    void OnScanComplete();
-    void OnRecoveryProgress(const RecoveryProgress& progress);
-    void OnRecoveryComplete(bool success);
-    void OnRecoveryPaused();
-
-    // Control creation helpers
-    HWND CreateLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h);
-    HWND CreateComboBox(HWND parent, int id, int x, int y, int w, int h);
-    HWND CreateButton(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h);
-    HWND CreateListView(HWND parent, int id, int x, int y, int w, int h);
-    HWND CreateStatic(HWND parent, int id, int x, int y, int w, int h);
-    HWND CreateStatusBar(HWND parent, int id);
-
-    // ListView setup
-    void SetupListViewColumns();
-    void AddListViewItem(const RecoverableFile& file, size_t index);
-    void ClearFileList();
-
-    // UI state helpers
-    void EnableControls(bool scanning);
-    void UpdateStatus(const wchar_t* text);
-    void UpdateProgress(int percent);
-
-    // Disk and partition management
-    void RefreshDiskList();
-    void RefreshPartitionList(const DiskInfo& disk);
-    const DiskInfo* GetSelectedDisk() const;
-    const PartitionInfo* GetSelectedPartition() const;
-
-    // Operations
-    void StartScan();
-    void StopScan();
-    void TogglePause();
-    void StartRecovery();
-    void UpdatePreview(int selectedIndex);
-    void LoadDemoData();  // Load demo data for testing without real disk
-
-    // Window class name
-    static constexpr const wchar_t* CLASS_NAME = L"DiskRecoverMainWindow";
+    // Scan cache DB
+    std::unique_ptr<ScanCacheDB> cache_db_;
 };
 
-} // namespace disk_recover::gui
+} // namespace disk_recover

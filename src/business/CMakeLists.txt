@@ -1,6 +1,7 @@
 add_library(disk_recover_business STATIC
     scan_cache_db.cpp
     scan_manager.cpp
+    scan_recover_manager.cpp
     multi_target_writer.cpp
     recovery_manager.cpp
     preview_manager.cpp

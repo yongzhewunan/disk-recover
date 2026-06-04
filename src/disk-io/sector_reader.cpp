@@ -66,8 +66,10 @@ bool SectorReader::read_sectors_checked(uint64_t start_sector, uint32_t count, A
 bool SectorReader::read_sectors_split(uint64_t start_sector, uint32_t count,
                                        AlignedBuffer& buffer,
                                        uint32_t& out_bad_count,
+                                       uint32_t& out_skip_ahead,
                                        std::function<bool()> should_stop) {
     out_bad_count = 0;
+    out_skip_ahead = 0;
     if (count == 0) return false;
     AlignedBuffer scratch_buf(static_cast<size_t>(count) * sector_size_, sector_size_);
     return read_sectors_split_impl(start_sector, count, buffer.data(), out_bad_count, scratch_buf, should_stop);

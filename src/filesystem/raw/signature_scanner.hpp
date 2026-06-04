@@ -18,12 +18,15 @@ public:
         std::function<bool()> should_stop;  // Called to check if scan should stop
     };
 
-    void scan(SectorReader& reader, const ScanConfig& config,
+    // Template to accept both SectorReader and BufferedSectorReader
+    template<typename ReaderType>
+    void scan(ReaderType& reader, const ScanConfig& config,
               std::function<void(RecoverableFile&&)> on_file_found,
               std::function<void(const ScanProgress&)> on_progress);
 
 private:
-    bool try_recover_file(SectorReader& reader, uint64_t start_sector,
+    template<typename ReaderType>
+    bool try_recover_file(ReaderType& reader, uint64_t start_sector,
                           const FileSignature& sig, RecoverableFile& file);
 
     static std::vector<RecoverableFile> merge_video_fragments(
@@ -31,3 +34,6 @@ private:
 };
 
 } // namespace disk_recover
+
+// Include implementation
+#include "signature_scanner_impl.hpp"

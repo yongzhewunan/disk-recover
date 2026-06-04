@@ -69,8 +69,13 @@ std::optional<MatchResult> validate_bmff(const uint8_t* data, size_t length) {
 
     // Validate ftyp box
     uint32_t box_size = read_be32(data + ftyp_pos);
-    if (box_size < 12 || box_size > length - ftyp_pos) {
-        return std::nullopt;
+
+    // For partial data (file carving), allow if we have at least the brand
+    // Box size validation only if we have enough data
+    bool partial_data = (box_size > length - ftyp_pos);
+
+    if (box_size < 12) {
+        return std::nullopt;  // Invalid box - minimum ftyp is 12 bytes
     }
 
     float evidence = BMFF_WEIGHTS.header_weight;

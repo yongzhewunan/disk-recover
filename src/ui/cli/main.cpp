@@ -7,6 +7,7 @@
 #include "disk-io/aligned_buffer.hpp"
 #include "business/scan_manager.hpp"
 #include "business/recovery_manager.hpp"
+#include "business/scan_recover_manager.hpp"
 #include "business/multi_target_writer.hpp"
 #include "business/scan_cache_db.hpp"
 #include "business/preview_manager.hpp"
@@ -857,6 +858,60 @@ int main(int argc, char** argv) {
         std::wcout << L"  片段数: " << target_file.fragments.size() << L"\n";
 
         db.close();
+    });
+
+    // scan-recover: Combined scan and recover in one step
+    std::string sr_device, sr_output;
+    bool sr_images = true, sr_videos = true;
+
+    auto sr_cmd = app.add_subcommand("scan-recover", "扫描并立即恢复文件 (一步完成)");
+    sr_cmd->add_option("device", sr_device, "磁盘设备路径 (如 \\\\.\\PhysicalDrive0)")->required();
+    sr_cmd->add_option("--output,-o", sr_output, "目标输出目录")->required();
+    sr_cmd->add_flag("--no-images", sr_images, "跳过图片文件")->group("");
+    sr_cmd->add_flag("--no-videos", sr_videos, "跳过视频文件")->group("");
+
+    sr_cmd->callback([&]() {
+        std::wstring device_path = std::wstring(sr_device.begin(), sr_device.end());
+        std::wstring output_path = std::wstring(sr_output.begin(), sr_output.end());
+
+        std::filesystem::create_directories(sr_output);
+
+        ScanAndRecoverManager mgr;
+        ScanAndRecoverManager::Config config;
+        config.device_path = device_path;
+        config.output_dirs.push_back(output_path);
+        config.scan_images = sr_images;
+        config.scan_videos = sr_videos;
+        config.session_id = "session_" + std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
+        mgr.set_progress_callback([&](const ScanAndRecoverManager::Progress& p) {
+            std::cout << "\r进度: " << static_cast<int>(p.percent) << "% | "
+                      << "文件: " << p.files_found << " | "
+                      << "已恢复: " << p.files_recovered << " | "
+                      << "失败: " << p.files_failed << " | "
+                      << "坏道: " << p.bad_sectors << std::flush;
+        });
+
+        std::cout << "开始扫描恢复: " << sr_device << " -> " << sr_output << "\n";
+
+        if (!mgr.start(config)) {
+            std::cerr << "\n启动扫描恢复失败\n";
+            return;
+        }
+
+        while (mgr.is_running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+
+        auto p = mgr.progress();
+        std::cout << "\n\n扫描恢复完成\n";
+        std::cout << "文件发现: " << p.files_found << "\n";
+        std::cout << "文件恢复: " << p.files_recovered << "\n";
+        std::cout << "文件失败: " << p.files_failed << "\n";
+        std::cout << "数据恢复: " << p.bytes_recovered << " bytes\n";
+        std::cout << "坏道: " << p.bad_sectors << "\n";
     });
 
     app.require_subcommand(-1);
