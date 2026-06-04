@@ -589,7 +589,14 @@ int main(int argc, char** argv) {
             std::wcout << L"\t";
 
             // Status
-            std::wcout << (f.is_corrupted ? L"损坏" : L"正常");
+            const wchar_t* cli_status = L"OK";
+            switch (f.corruption_level) {
+            case CorruptionLevel::None:    cli_status = L"OK"; break;
+            case CorruptionLevel::Minor:   cli_status = L"Warning"; break;
+            case CorruptionLevel::Moderate: cli_status = L"Damaged"; break;
+            case CorruptionLevel::Severe:  cli_status = L"Corrupted"; break;
+            }
+            std::wcout << cli_status;
             std::wcout << L"\n";
 
             displayed++;
@@ -681,7 +688,7 @@ int main(int argc, char** argv) {
             default: std::wcout << L"未知"; break;
         }
         std::wcout << L"\n";
-        std::wcout << L"  状态: " << (target_file.is_corrupted ? L"已损坏" : L"正常") << L"\n";
+        std::wcout << L"  状态: " << (target_file.is_corrupted() ? L"已损坏" : L"正常") << L"\n";
         std::wcout << L"  片段数: " << target_file.fragments.size() << L"\n";
         for (size_t i = 0; i < target_file.fragments.size() && i < 5; ++i) {
             const auto& frag = target_file.fragments[i];
@@ -854,7 +861,7 @@ int main(int argc, char** argv) {
             default: std::wcout << L"未知"; break;
         }
         std::wcout << L"\n";
-        std::wcout << L"  状态: " << (target_file.is_corrupted ? L"已损坏" : L"正常") << L"\n";
+        std::wcout << L"  状态: " << (target_file.is_corrupted() ? L"已损坏" : L"正常") << L"\n";
         std::wcout << L"  片段数: " << target_file.fragments.size() << L"\n";
 
         db.close();

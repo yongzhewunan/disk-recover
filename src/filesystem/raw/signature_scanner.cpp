@@ -17,8 +17,6 @@ std::vector<RecoverableFile> SignatureScanner::merge_video_fragments(
             return a.fragments[0].start_sector < b.fragments[0].start_sector;
         });
 
-    const uint64_t MAX_GAP_SECTORS = (1024ULL * 1024) / sector_size;
-
     auto get_extension = [](const std::wstring& name) -> std::wstring {
         auto pos = name.rfind(L'.');
         if (pos == std::wstring::npos) return L"";
@@ -43,7 +41,11 @@ std::vector<RecoverableFile> SignatureScanner::merge_video_fragments(
             uint64_t current_start = current.fragments[0].start_sector;
             uint64_t gap = (current_start > last_end) ? (current_start - last_end) : 0;
 
-            if (gap <= MAX_GAP_SECTORS) {
+            // Format-aware gap threshold
+            uint64_t max_gap_bytes = video_merge_gap_bytes(get_extension(last.file_name));
+            uint64_t max_gap_sectors = max_gap_bytes / sector_size;
+
+            if (gap <= max_gap_sectors) {
                 if (gap > 0) {
                     last.fragments.push_back({last_end, gap});
                 }
@@ -55,7 +57,22 @@ std::vector<RecoverableFile> SignatureScanner::merge_video_fragments(
                     total_sectors += frag.sector_count;
                 }
                 last.file_size = total_sectors * sector_size;
-                last.is_corrupted = true;
+
+                // Smart corruption assessment based on merge quality
+                uint64_t gap_bytes = gap * sector_size;
+                if (last.confidence >= 50 && current.confidence >= 50 && gap_bytes <= max_gap_bytes / 4) {
+                    // High confidence, small gap — likely a good merge
+                    last.corruption_level = std::max(last.corruption_level, CorruptionLevel::Minor);
+                } else if (gap_bytes <= max_gap_bytes / 2) {
+                    // Medium quality merge
+                    last.corruption_level = std::max(last.corruption_level, CorruptionLevel::Moderate);
+                } else {
+                    // Large gap — uncertain merge
+                    last.corruption_level = std::max(last.corruption_level, CorruptionLevel::Severe);
+                }
+
+                // Update confidence to average of merged fragments
+                last.confidence = (last.confidence + current.confidence) / 2;
                 continue;
             }
         }

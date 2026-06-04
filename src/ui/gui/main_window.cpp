@@ -520,7 +520,7 @@ void MainWindow::add_file_to_list(const RecoverableFile& file, const std::wstrin
     }
     ListView_SetItemText(h_list_files_, idx, 3, const_cast<LPWSTR>(dir_path.c_str()));
 
-    const wchar_t* status = file.is_corrupted ? L"Damaged" : L"OK";
+    const wchar_t* status = file.is_corrupted() ? L"Damaged" : L"OK";
     ListView_SetItemText(h_list_files_, idx, 4, const_cast<LPWSTR>(status));
 }
 

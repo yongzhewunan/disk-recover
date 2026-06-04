@@ -210,7 +210,7 @@ void MftParser::process_mft_record(uint8_t* data, uint64_t entry_index, bool inc
     file.mft_id = entry_index;
     if (parse_mft_record(data, mft_record_size_, file, is_deleted)) {
         file.file_type = detect_file_type(file.file_name);
-        file.is_corrupted = is_deleted;
+        file.corruption_level = is_deleted ? CorruptionLevel::Minor : CorruptionLevel::None;
         callback(std::move(file));
         file_count++;
     } else {

@@ -315,7 +315,7 @@ bool FatParser::enumerate_root_dir(SectorReader& reader,
         if (cluster >= 2 && file_size > 0) {
             RecoverableFile file{};
             file.file_name = file_name;
-            file.is_corrupted = (entry[0] == 0xE5);
+            file.corruption_level = (entry[0] == 0xE5) ? CorruptionLevel::Minor : CorruptionLevel::None;
             file.file_size = file_size;
             file.file_type = detect_file_type(file.file_name);
             read_cluster_chain(reader, cluster, file.fragments);
@@ -432,7 +432,7 @@ bool FatParser::enumerate_directory(SectorReader& reader, uint32_t start_cluster
         if (cluster >= 2 && file_size > 0) {
             RecoverableFile file{};
             file.file_name = file_name;
-            file.is_corrupted = (entry[0] == 0xE5);
+            file.corruption_level = (entry[0] == 0xE5) ? CorruptionLevel::Minor : CorruptionLevel::None;
             file.file_size = file_size;
             file.file_type = detect_file_type(file.file_name);
             read_cluster_chain(reader, cluster, file.fragments);

@@ -43,14 +43,30 @@ struct DiskExtent {
     uint64_t sector_count;
 };
 
+// Corruption severity levels for recovered files
+enum class CorruptionLevel : uint8_t {
+    None = 0,       // File appears intact (header + footer + high confidence)
+    Minor = 1,      // Missing footer or partial match, but header validated
+    Moderate = 2,   // Missing header validation, or low confidence match
+    Severe = 3      // Read errors, failed merge, or very low confidence
+};
+
 struct RecoverableFile {
     uint64_t db_id = 0;  // Database row ID for efficient pagination
     std::wstring file_name;
     uint64_t file_size;
     std::vector<DiskExtent> fragments;
-    bool is_corrupted;
+    CorruptionLevel corruption_level = CorruptionLevel::None;
     FileType file_type;
     std::optional<uint64_t> mft_id;
+
+    // Confidence scoring from file signature validators (0-100)
+    uint8_t confidence = 0;
+    // Raw MatchFlags bits from file_signatures.hpp MatchFlags enum
+    uint32_t match_flags_raw = 0;
+
+    // Legacy accessor for backward compatibility
+    bool is_corrupted() const { return corruption_level != CorruptionLevel::None; }
 };
 
 struct DiskGeometry {

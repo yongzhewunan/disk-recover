@@ -6,6 +6,12 @@
 
 namespace disk_recover {
 
+// Minimum confidence threshold for accepting a file signature match
+constexpr uint8_t MIN_CONFIDENCE_THRESHOLD = 15;
+
+// Maximum sectors to search for video file boundary (100MB)
+constexpr uint64_t MAX_VIDEO_SEARCH_SECTORS = 204800;
+
 class SignatureScanner {
 public:
     struct ScanConfig {
@@ -27,7 +33,7 @@ public:
 private:
     template<typename ReaderType>
     bool try_recover_file(ReaderType& reader, uint64_t start_sector,
-                          const FileSignature& sig, RecoverableFile& file);
+                          const MatchResult& match_result, RecoverableFile& file);
 
     static std::vector<RecoverableFile> merge_video_fragments(
         std::vector<RecoverableFile>& files, uint32_t sector_size);

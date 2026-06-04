@@ -111,6 +111,9 @@ bool ScanCacheDB::ensure_tables() {
             file_size INTEGER NOT NULL,
             file_type INTEGER NOT NULL,
             is_corrupted INTEGER NOT NULL,
+            corruption_level INTEGER NOT NULL DEFAULT 0,
+            confidence INTEGER NOT NULL DEFAULT 0,
+            match_flags INTEGER NOT NULL DEFAULT 0,
             mft_id INTEGER,
             fragments BLOB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -164,6 +167,11 @@ bool ScanCacheDB::ensure_tables() {
     sqlite3_exec(db_, "ALTER TABLE scan_progress ADD COLUMN scan_phase INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "ALTER TABLE scan_progress ADD COLUMN raw_resume_sector INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
 
+    // Migrate: add corruption_level, confidence, match_flags columns if missing
+    sqlite3_exec(db_, "ALTER TABLE scan_result ADD COLUMN corruption_level INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "ALTER TABLE scan_result ADD COLUMN confidence INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "ALTER TABLE scan_result ADD COLUMN match_flags INTEGER NOT NULL DEFAULT 0", nullptr, nullptr, nullptr);
+
     return true;
 }
 
@@ -190,8 +198,9 @@ bool ScanCacheDB::create_session(const std::string& session_id) {
 bool ScanCacheDB::insert_file(const std::string& session_id, const RecoverableFile& file) {
     const char* sql = R"(
         INSERT INTO scan_result
-            (session_id, file_name, file_size, file_type, is_corrupted, mft_id, fragments)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (session_id, file_name, file_size, file_type, is_corrupted,
+             corruption_level, confidence, match_flags, mft_id, fragments)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -205,19 +214,22 @@ bool ScanCacheDB::insert_file(const std::string& session_id, const RecoverableFi
     sqlite3_bind_text(stmt, 2, file_name_utf8.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(file.file_size));
     sqlite3_bind_int(stmt, 4, static_cast<int>(file.file_type));
-    sqlite3_bind_int(stmt, 5, file.is_corrupted ? 1 : 0);
+    sqlite3_bind_int(stmt, 5, file.is_corrupted() ? 1 : 0);
+    sqlite3_bind_int(stmt, 6, static_cast<int>(file.corruption_level));
+    sqlite3_bind_int(stmt, 7, static_cast<int>(file.confidence));
+    sqlite3_bind_int(stmt, 8, static_cast<int>(file.match_flags_raw));
 
     if (file.mft_id.has_value()) {
-        sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(*file.mft_id));
+        sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(*file.mft_id));
     } else {
-        sqlite3_bind_null(stmt, 6);
+        sqlite3_bind_null(stmt, 9);
     }
 
     if (!fragments_blob.empty()) {
-        sqlite3_bind_blob(stmt, 7, fragments_blob.data(),
+        sqlite3_bind_blob(stmt, 10, fragments_blob.data(),
                          static_cast<int>(fragments_blob.size()), SQLITE_TRANSIENT);
     } else {
-        sqlite3_bind_null(stmt, 7);
+        sqlite3_bind_null(stmt, 10);
     }
 
     rc = sqlite3_step(stmt);
@@ -238,8 +250,9 @@ bool ScanCacheDB::insert_files_bulk(const std::string& session_id,
 
     const char* sql = R"(
         INSERT INTO scan_result
-            (session_id, file_name, file_size, file_type, is_corrupted, mft_id, fragments)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (session_id, file_name, file_size, file_type, is_corrupted,
+             corruption_level, confidence, match_flags, mft_id, fragments)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -258,19 +271,22 @@ bool ScanCacheDB::insert_files_bulk(const std::string& session_id,
         sqlite3_bind_text(stmt, 2, file_name_utf8.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(file.file_size));
         sqlite3_bind_int(stmt, 4, static_cast<int>(file.file_type));
-        sqlite3_bind_int(stmt, 5, file.is_corrupted ? 1 : 0);
+        sqlite3_bind_int(stmt, 5, file.is_corrupted() ? 1 : 0);
+        sqlite3_bind_int(stmt, 6, static_cast<int>(file.corruption_level));
+        sqlite3_bind_int(stmt, 7, static_cast<int>(file.confidence));
+        sqlite3_bind_int(stmt, 8, static_cast<int>(file.match_flags_raw));
 
         if (file.mft_id.has_value()) {
-            sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(*file.mft_id));
+            sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(*file.mft_id));
         } else {
-            sqlite3_bind_null(stmt, 6);
+            sqlite3_bind_null(stmt, 9);
         }
 
         if (!fragments_blob.empty()) {
-            sqlite3_bind_blob(stmt, 7, fragments_blob.data(),
+            sqlite3_bind_blob(stmt, 10, fragments_blob.data(),
                              static_cast<int>(fragments_blob.size()), SQLITE_TRANSIENT);
         } else {
-            sqlite3_bind_null(stmt, 7);
+            sqlite3_bind_null(stmt, 10);
         }
 
         rc = sqlite3_step(stmt);
@@ -318,7 +334,8 @@ std::vector<RecoverableFile> ScanCacheDB::query_files(const std::string& session
     std::vector<RecoverableFile> files;
 
     const char* sql = R"(
-        SELECT file_name, file_size, file_type, is_corrupted, mft_id, fragments
+        SELECT file_name, file_size, file_type, is_corrupted,
+               corruption_level, confidence, match_flags, mft_id, fragments
         FROM scan_result
         WHERE session_id = ?
         ORDER BY id
@@ -342,14 +359,17 @@ std::vector<RecoverableFile> ScanCacheDB::query_files(const std::string& session
 
         file.file_size = static_cast<uint64_t>(sqlite3_column_int64(stmt, 1));
         file.file_type = static_cast<FileType>(sqlite3_column_int(stmt, 2));
-        file.is_corrupted = sqlite3_column_int(stmt, 3) != 0;
+        // col 3: is_corrupted (legacy, read for backward compat)
+        file.corruption_level = static_cast<CorruptionLevel>(sqlite3_column_int(stmt, 4));
+        file.confidence = static_cast<uint8_t>(sqlite3_column_int(stmt, 5));
+        file.match_flags_raw = static_cast<uint32_t>(sqlite3_column_int(stmt, 6));
 
-        if (sqlite3_column_type(stmt, 4) != SQLITE_NULL) {
-            file.mft_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 4));
+        if (sqlite3_column_type(stmt, 7) != SQLITE_NULL) {
+            file.mft_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 7));
         }
 
-        const void* frag_data = sqlite3_column_blob(stmt, 5);
-        int frag_size = sqlite3_column_bytes(stmt, 5);
+        const void* frag_data = sqlite3_column_blob(stmt, 8);
+        int frag_size = sqlite3_column_bytes(stmt, 8);
         file.fragments = deserialize_fragments(frag_data, frag_size);
 
         files.push_back(std::move(file));
@@ -365,7 +385,8 @@ std::vector<RecoverableFile> ScanCacheDB::query_files_after_id(const std::string
 
     // Use WHERE id > last_id for efficient pagination
     const char* sql = R"(
-        SELECT id, file_name, file_size, file_type, is_corrupted, mft_id, fragments
+        SELECT id, file_name, file_size, file_type, is_corrupted,
+               corruption_level, confidence, match_flags, mft_id, fragments
         FROM scan_result
         WHERE session_id = ? AND id > ?
         ORDER BY id
@@ -392,14 +413,17 @@ std::vector<RecoverableFile> ScanCacheDB::query_files_after_id(const std::string
 
         file.file_size = static_cast<uint64_t>(sqlite3_column_int64(stmt, 2));
         file.file_type = static_cast<FileType>(sqlite3_column_int(stmt, 3));
-        file.is_corrupted = sqlite3_column_int(stmt, 4) != 0;
+        // col 4: is_corrupted (legacy)
+        file.corruption_level = static_cast<CorruptionLevel>(sqlite3_column_int(stmt, 5));
+        file.confidence = static_cast<uint8_t>(sqlite3_column_int(stmt, 6));
+        file.match_flags_raw = static_cast<uint32_t>(sqlite3_column_int(stmt, 7));
 
-        if (sqlite3_column_type(stmt, 5) != SQLITE_NULL) {
-            file.mft_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 5));
+        if (sqlite3_column_type(stmt, 8) != SQLITE_NULL) {
+            file.mft_id = static_cast<uint64_t>(sqlite3_column_int64(stmt, 8));
         }
 
-        const void* frag_data = sqlite3_column_blob(stmt, 6);
-        int frag_size = sqlite3_column_bytes(stmt, 6);
+        const void* frag_data = sqlite3_column_blob(stmt, 9);
+        int frag_size = sqlite3_column_bytes(stmt, 9);
         file.fragments = deserialize_fragments(frag_data, frag_size);
 
         files.push_back(std::move(file));

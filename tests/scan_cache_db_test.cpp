@@ -39,7 +39,7 @@ TEST_F(ScanCacheDBTest, InsertAndQueryFile) {
     file.file_name = L"test.jpg";
     file.file_size = 1024;
     file.file_type = FileType::Image;
-    file.is_corrupted = false;
+    file.corruption_level = CorruptionLevel::None;
     file.fragments.push_back({1000, 2});
 
     EXPECT_TRUE(db.insert_file("test_session", file));
@@ -64,7 +64,7 @@ TEST_F(ScanCacheDBTest, BulkInsertFiles) {
         file.file_name = L"file_" + std::to_wstring(i) + L".jpg";
         file.file_size = i * 1024;
         file.file_type = FileType::Image;
-        file.is_corrupted = (i % 10 == 0);
+        file.corruption_level = (i % 10 == 0) ? CorruptionLevel::Minor : CorruptionLevel::None;
         file.fragments.push_back({static_cast<uint64_t>(i * 100), 2});
         files.push_back(file);
     }
@@ -141,7 +141,7 @@ TEST_F(ScanCacheDBTest, FileWithMftId) {
     file.file_name = L"ntfs_file.txt";
     file.file_size = 2048;
     file.file_type = FileType::Unknown;
-    file.is_corrupted = false;
+    file.corruption_level = CorruptionLevel::None;
     file.mft_id = 12345;
     file.fragments.push_back({5000, 4});
 
@@ -164,7 +164,7 @@ TEST_F(ScanCacheDBTest, MultipleFragments) {
     file.file_name = L"fragmented.dat";
     file.file_size = 8192;
     file.file_type = FileType::Unknown;
-    file.is_corrupted = false;
+    file.corruption_level = CorruptionLevel::None;
     file.fragments.push_back({100, 2});
     file.fragments.push_back({200, 3});
     file.fragments.push_back({500, 1});
@@ -193,7 +193,7 @@ TEST_F(ScanCacheDBTest, UnicodeFileName) {
     file.file_name = L"中文文件.jpg";  // Chinese characters
     file.file_size = 1024;
     file.file_type = FileType::Image;
-    file.is_corrupted = false;
+    file.corruption_level = CorruptionLevel::None;
 
     EXPECT_TRUE(db.insert_file("test_session", file));
 
