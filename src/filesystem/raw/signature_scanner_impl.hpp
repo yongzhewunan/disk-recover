@@ -296,11 +296,22 @@ static CorruptionLevel assess_corruption(const MatchResult& mr, bool header_ok, 
 
     if (!header_ok) return CorruptionLevel::Severe;
 
+    // Header + Footer + high confidence -> intact
     if (has_header && has_footer && mr.confidence >= 60) return CorruptionLevel::None;
-    if (has_header && !has_footer && mr.confidence >= 40) return CorruptionLevel::Minor;
-    if (partial || mr.confidence < 40) return CorruptionLevel::Moderate;
-    if (mr.confidence < 20) return CorruptionLevel::Severe;
-    return CorruptionLevel::Minor;
+
+    // Header + Footer but lower confidence -> minor issue
+    if (has_header && has_footer && mr.confidence < 60) return CorruptionLevel::Minor;
+
+    // Header only with high confidence -> likely truncated (no footer found)
+    if (has_header && !has_footer && mr.confidence >= 60) return CorruptionLevel::Minor;
+
+    // Header only with moderate confidence -> likely damaged
+    if (has_header && !has_footer && mr.confidence >= 30) return CorruptionLevel::Moderate;
+
+    // Low confidence or partial match -> severely damaged
+    if (partial || mr.confidence < 30) return CorruptionLevel::Severe;
+
+    return CorruptionLevel::Moderate;
 }
 
 // ── Format-aware gap threshold for video merging ──

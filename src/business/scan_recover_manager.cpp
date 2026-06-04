@@ -348,9 +348,8 @@ void ScanAndRecoverManager::worker_thread(Config config) {
 
         if (stop_requested_.load()) return;
 
-        // Skip files with Severe or Moderate corruption — they are too damaged to be usable
-        if (file.corruption_level == CorruptionLevel::Severe ||
-            file.corruption_level == CorruptionLevel::Moderate) {
+        // Skip files with any corruption — they are too damaged to be usable
+        if (file.corruption_level != CorruptionLevel::None) {
             LOG_FMT(L"[ScanRecover] Skipping %s (corruption level=%u, confidence=%u)",
                      file.file_name.c_str(), static_cast<unsigned>(file.corruption_level),
                      static_cast<unsigned>(file.confidence));
