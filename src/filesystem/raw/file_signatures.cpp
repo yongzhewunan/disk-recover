@@ -66,6 +66,8 @@ static std::optional<MatchResult> validate_bmp(const uint8_t* data, size_t lengt
     if (data[0] != 0x42 || data[1] != 0x4D) return std::nullopt;
 
     // BMP header validation
+    // Bytes 2-5: file size (little-endian)
+    // Bytes 10-13: pixel data offset
     uint32_t file_size = data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24);
     uint32_t data_offset = data[10] | (data[11] << 8) | (data[12] << 16) | (data[13] << 24);
 
@@ -74,14 +76,59 @@ static std::optional<MatchResult> validate_bmp(const uint8_t* data, size_t lengt
         return MatchResult{
             {FileType::Image, L"bmp", L"BMP"},
             40,  // Low confidence - header present but values suspicious
-            MatchFlags::HasHeader | MatchFlags::PartialMatch
+            MatchFlags::HasHeader | MatchFlags::PartialMatch,
+            0
         };
+    }
+
+    // Validate BMP dimensions if DIB header is present
+    float evidence = 60.0f;
+    MatchFlags flags = MatchFlags::HasHeader | MatchFlags::DeepValidated;
+
+    // Read image dimensions from DIB header (BITMAPINFOHEADER)
+    // Bytes 18-21: width, Bytes 22-25: height
+    if (length >= 26) {
+        int32_t width = static_cast<int32_t>(data[18] | (data[19] << 8) | (data[20] << 16) | (data[21] << 24));
+        int32_t height = static_cast<int32_t>(data[22] | (data[23] << 8) | (data[24] << 16) | (data[25] << 24));
+
+        // BMP height can be negative (top-down DIB)
+        int32_t abs_height = height < 0 ? -height : height;
+
+        // Reasonable image dimensions (1 to 65535)
+        if (width > 0 && width <= 65535 && abs_height > 0 && abs_height <= 65535) {
+            evidence += 15.0f;  // Good structure evidence
+
+            // Calculate expected file size from dimensions
+            // Row size is padded to 4-byte boundary
+            uint32_t bytes_per_pixel = 3;  // Default 24-bit
+            // Check bits per pixel at offset 28
+            if (length >= 30) {
+                uint16_t bits_per_pixel = data[28] | (data[29] << 8);
+                if (bits_per_pixel >= 1 && bits_per_pixel <= 32) {
+                    bytes_per_pixel = (bits_per_pixel + 7) / 8;
+                }
+            }
+            uint32_t row_size = ((width * bytes_per_pixel + 3) / 4) * 4;
+            uint32_t expected_data_size = row_size * abs_height;
+            uint32_t expected_file_size = data_offset + expected_data_size;
+
+            // Allow some tolerance for file size (BMP headers vary)
+            // If calculated size is close to declared size, high confidence
+            if (expected_file_size > 0 && file_size > 0) {
+                uint32_t diff = (expected_file_size > file_size) ?
+                                (expected_file_size - file_size) : (file_size - expected_file_size);
+                if (diff < file_size / 10) {  // Within 10%
+                    evidence += 10.0f;
+                }
+            }
+        }
     }
 
     return MatchResult{
         {FileType::Image, L"bmp", L"BMP"},
-        75,  // Good confidence
-        MatchFlags::HasHeader | MatchFlags::DeepValidated
+        static_cast<uint8_t>(evidence > 100 ? 100 : evidence),
+        flags,
+        file_size  // verified_file_size from BMP header
     };
 }
 

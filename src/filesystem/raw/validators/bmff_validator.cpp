@@ -80,6 +80,44 @@ std::optional<MatchResult> validate_bmff(const uint8_t* data, size_t length) {
 
     float evidence = BMFF_WEIGHTS.header_weight;
     MatchFlags flags = MatchFlags::HasHeader;
+    uint64_t verified_file_size = 0;
+
+    // Try to calculate file size by walking boxes
+    // This works if the first box extends to end of file or we can walk the tree
+    if (ftyp_pos == 0) {
+        // ftyp is at the beginning - walk boxes to find total size
+        size_t pos = 0;
+        uint64_t total_size = 0;
+
+        while (pos + 8 <= length) {
+            uint32_t current_box_size = read_be32(data + pos);
+
+            // Check for 64-bit extended size (box_size == 1)
+            if (current_box_size == 1) {
+                if (pos + 16 > length) break;
+                uint64_t ext_size = read_be64(data + pos + 8);
+                if (ext_size > 0) {
+                    total_size = pos + ext_size;
+                    break;  // Found exact size
+                }
+                pos += 16;
+            } else if (current_box_size == 0) {
+                // Box extends to end of file - this is the total size
+                total_size = 0;  // Unknown, extends to end
+                break;
+            } else if (current_box_size >= 8) {
+                pos += current_box_size;
+                total_size = pos;
+            } else {
+                break;  // Invalid box size
+            }
+
+            // Stop if we've walked past available data
+            if (pos > length) break;
+        }
+
+        verified_file_size = total_size;
+    }
 
     // Get major brand
     const uint8_t* brand_ptr = data + ftyp_pos + 8;
@@ -100,7 +138,8 @@ std::optional<MatchResult> validate_bmff(const uint8_t* data, size_t length) {
             {brand_entry->file_type, std::wstring(brand_entry->extension),
              std::wstring(brand_entry->description)},
             normalize_confidence(evidence, BMFF_WEIGHTS),
-            flags | MatchFlags::DeepValidated
+            flags | MatchFlags::DeepValidated,
+            verified_file_size
         };
     }
 
@@ -127,7 +166,8 @@ std::optional<MatchResult> validate_bmff(const uint8_t* data, size_t length) {
     return MatchResult{
         {FileType::Video, L"mp4", L"MP4 (unknown brand)"},
         normalize_confidence(evidence, BMFF_WEIGHTS),
-        flags
+        flags,
+        verified_file_size
     };
 }
 

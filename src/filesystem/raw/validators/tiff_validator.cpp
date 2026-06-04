@@ -101,7 +101,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
             return MatchResult{
                 {FileType::Image, L"orf", L"Olympus ORF"},
                 95,
-                MatchFlags::HasHeader | MatchFlags::DeepValidated
+                MatchFlags::HasHeader | MatchFlags::DeepValidated,
+                0  // TIFF/RAW size requires full IFD traversal
             };
         }
     }
@@ -131,7 +132,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
             return MatchResult{
                 {FileType::Image, L"rw2", L"Panasonic RW2"},
                 95,
-                MatchFlags::HasHeader | MatchFlags::DeepValidated
+                MatchFlags::HasHeader | MatchFlags::DeepValidated,
+                0  // TIFF/RAW size requires full IFD traversal
             };
         }
     }
@@ -151,7 +153,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
         return MatchResult{
             {FileType::Image, L"cr2", L"Canon CR2"},
             98,
-            flags | MatchFlags::ContainerParsed
+            flags | MatchFlags::ContainerParsed,
+            0  // TIFF/RAW size requires full IFD traversal
         };
     }
 
@@ -178,7 +181,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                     return MatchResult{
                         {FileType::Image, L"dng", L"Adobe DNG"},
                         98,
-                        flags | MatchFlags::ContainerParsed
+                        flags | MatchFlags::ContainerParsed,
+                        0  // TIFF/RAW size requires full IFD traversal
                     };
                 }
 
@@ -198,7 +202,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                             return MatchResult{
                                 {FileType::Image, L"nef", L"Nikon NEF"},
                                 96,
-                                flags | MatchFlags::ContainerParsed
+                                flags | MatchFlags::ContainerParsed,
+                                0  // TIFF/RAW size requires full IFD traversal
                             };
                         }
 
@@ -208,7 +213,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                             return MatchResult{
                                 {FileType::Image, L"arw", L"Sony ARW"},
                                 96,
-                                flags | MatchFlags::ContainerParsed
+                                flags | MatchFlags::ContainerParsed,
+                                0  // TIFF/RAW size requires full IFD traversal
                             };
                         }
 
@@ -218,7 +224,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                             return MatchResult{
                                 {FileType::Image, L"rw2", L"Panasonic RW2"},
                                 96,
-                                flags | MatchFlags::ContainerParsed
+                                flags | MatchFlags::ContainerParsed,
+                                0  // TIFF/RAW size requires full IFD traversal
                             };
                         }
 
@@ -228,7 +235,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
                             return MatchResult{
                                 {FileType::Image, L"orf", L"Olympus ORF"},
                                 96,
-                                flags | MatchFlags::ContainerParsed
+                                flags | MatchFlags::ContainerParsed,
+                                0  // TIFF/RAW size requires full IFD traversal
                             };
                         }
 
@@ -296,7 +304,8 @@ std::optional<MatchResult> validate_tiff_raw(const uint8_t* data, size_t length)
     return MatchResult{
         {FileType::Image, ext, desc},
         normalize_confidence(evidence, TIFF_WEIGHTS),
-        flags
+        flags,
+        0  // TIFF/RAW size requires full IFD traversal
     };
 }
 

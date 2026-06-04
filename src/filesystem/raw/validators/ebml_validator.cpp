@@ -67,6 +67,7 @@ std::optional<MatchResult> validate_ebml(const uint8_t* data, size_t length) {
 
     // Phase 2: Parse EBML header structure
     size_t pos = 4;
+    uint64_t verified_file_size = 0;
 
     // Read EBML header size
     size_t size_bytes = 0;
@@ -75,7 +76,8 @@ std::optional<MatchResult> validate_ebml(const uint8_t* data, size_t length) {
         return MatchResult{
             {FileType::Video, L"mkv", L"MKV/WebM"},
             50,  // Low confidence
-            flags | MatchFlags::PartialMatch
+            flags | MatchFlags::PartialMatch,
+            0
         };
     }
 
@@ -120,7 +122,8 @@ std::optional<MatchResult> validate_ebml(const uint8_t* data, size_t length) {
                     return MatchResult{
                         {FileType::Video, L"mkv", L"MKV"},
                         normalize_confidence(evidence, EBML_WEIGHTS),
-                        flags
+                        flags,
+                        verified_file_size
                     };
                 }
 
@@ -131,7 +134,8 @@ std::optional<MatchResult> validate_ebml(const uint8_t* data, size_t length) {
                     return MatchResult{
                         {FileType::Video, L"webm", L"WebM"},
                         normalize_confidence(evidence, EBML_WEIGHTS),
-                        flags
+                        flags,
+                        verified_file_size
                     };
                 }
             }
@@ -145,7 +149,8 @@ std::optional<MatchResult> validate_ebml(const uint8_t* data, size_t length) {
     return MatchResult{
         {FileType::Video, L"mkv", L"MKV"},
         normalize_confidence(evidence, EBML_WEIGHTS),
-        flags
+        flags,
+        verified_file_size
     };
 }
 

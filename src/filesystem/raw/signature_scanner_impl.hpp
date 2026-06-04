@@ -506,9 +506,12 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     AlignedBuffer headerBuf(HEADER_SECTORS * sector_size, sector_size);
     bool header_ok = reader.read_sectors_checked(start_sector, HEADER_SECTORS, headerBuf);
 
+    // ── Step 0: Use verified_file_size from validator if available ──
+    // This is the most accurate source - comes from format-specific parsing
+    uint64_t estimated_size = match_result.verified_file_size;
+
     // ── Step 1: Try embedded file size from header ──
-    uint64_t estimated_size = 0;
-    if (header_ok) {
+    if (estimated_size == 0 && header_ok) {
         estimated_size = parse_file_size(sig.file_type, headerBuf.data(),
                                           HEADER_SECTORS * sector_size);
     }
@@ -525,7 +528,11 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             reader, start_sector, sig.file_type, sig.extension,
             heuristic_size, sector_size, footer_found);
         if (footer_size > 0) {
-            estimated_size = footer_size; // Use footer-based size (more accurate)
+            // Only override verified_file_size if footer search found something
+            // and we didn't have a verified size
+            if (estimated_size == 0) {
+                estimated_size = footer_size;
+            }
             file.match_flags_raw |= static_cast<uint32_t>(MatchFlags::HasFooter);
         }
     }
