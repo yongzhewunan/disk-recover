@@ -375,17 +375,23 @@ void ScanAndRecoverManager::worker_thread(Config config) {
 
         if (stop_requested_.load()) return;
 
-        // Skip files with any corruption — they are too damaged to be usable
-        if (file.corruption_level != CorruptionLevel::None) {
-            LOG_FMT(L"[ScanRecover] Skipping %s (corruption level=%u, confidence=%u)",
-                     file.file_name.c_str(), static_cast<unsigned>(file.corruption_level),
-                     static_cast<unsigned>(file.confidence));
+        // Skip only severely damaged files — others may still be partially recoverable
+        if (file.corruption_level == CorruptionLevel::Severe) {
+            LOG_FMT(L"[ScanRecover] Skipping severely damaged %s (confidence=%u)",
+                     file.file_name.c_str(), static_cast<unsigned>(file.confidence));
             {
                 std::lock_guard lock(progress_mutex_);
                 progress_.files_found++;
                 progress_.files_failed++;
             }
             return;
+        }
+
+        // Log non-severe corruption for user awareness
+        if (file.corruption_level != CorruptionLevel::None) {
+            LOG_FMT(L"[ScanRecover] Recovering %s with corruption level=%u, confidence=%u",
+                     file.file_name.c_str(), static_cast<unsigned>(file.corruption_level),
+                     static_cast<unsigned>(file.confidence));
         }
 
         // Save to database before recovery
