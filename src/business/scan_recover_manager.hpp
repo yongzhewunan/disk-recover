@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <windows.h>
 
 namespace disk_recover {
 
@@ -19,12 +20,32 @@ namespace disk_recover {
 // Scans disk and immediately recovers found files
 class ScanAndRecoverManager {
 public:
+    struct Progress {
+        uint64_t sectors_scanned = 0;
+        uint64_t total_sectors = 0;
+        uint32_t files_found = 0;
+        uint32_t files_recovered = 0;
+        uint64_t bytes_recovered = 0;
+        uint32_t files_failed = 0;
+        uint32_t bad_sectors = 0;
+        uint32_t sectors_skipped = 0;
+        uint64_t current_sector = 0;  // Current scanning position for resume
+        uint8_t percent = 0;
+        bool is_complete = false;
+        bool is_paused = false;
+    };
+
+    // Custom WM_USER messages for PostMessage notifications
+// (values match those in resource.h for the GUI layer)
+#define SRM_WM_SCAN_RECOVER_PAUSED    (WM_USER + 311)
+#define SRM_WM_SCAN_RECOVER_COMPLETE  (WM_USER + 312)
+
     struct Config {
         std::wstring device_path;
         std::wstring db_path;
         std::vector<std::wstring> output_dirs;
         std::string session_id;
-        ScanMode mode = ScanMode::Full;
+        ScanMode mode = ScanMode::Deep;
 
         // File type filters
         bool scan_images = true;
@@ -44,23 +65,18 @@ public:
         size_t buffer_size = BufferedSectorReader::DEFAULT_BUFFER_SIZE;
 
         // Recovery options
-        uint64_t min_free_space = 1ULL << 30;  // 1GB minimum
+        uint64_t min_free_space = 2ULL * 1024 * 1024 * 1024;  // 2GB minimum
         uint32_t max_files_per_dir = 500;
-    };
 
-    struct Progress {
-        uint64_t sectors_scanned = 0;
-        uint64_t total_sectors = 0;
-        uint32_t files_found = 0;
-        uint32_t files_recovered = 0;
-        uint64_t bytes_recovered = 0;
-        uint32_t files_failed = 0;
-        uint32_t bad_sectors = 0;
-        uint32_t sectors_skipped = 0;
-        uint64_t current_sector = 0;  // Current scanning position for resume
-        uint8_t percent = 0;
-        bool is_complete = false;
-        bool is_paused = false;
+        // HWND for PostMessage notifications (auto-pause, completion)
+        HWND hwnd = nullptr;
+
+        // Callback: called on worker thread when a file is successfully recovered
+        // save_path is the full path where the file was written
+        std::function<void(const RecoverableFile& file, const std::wstring& save_path)> on_file_recovered;
+
+        // Progress callback
+        std::function<void(const Progress&)> on_progress;
     };
 
     ScanAndRecoverManager() = default;
@@ -79,16 +95,19 @@ public:
     bool is_paused() const { return paused_.load(); }
     Progress progress() const;
 
-    void set_progress_callback(std::function<void(const Progress&)> cb) {
-        on_progress_ = std::move(cb);
-    }
-
 private:
     void worker_thread(Config config);
     bool recover_file(const RecoverableFile& file, BufferedSectorReader& reader,
                       const std::wstring& output_dir);
     std::wstring generate_output_path(const std::wstring& base_dir,
                                        const std::wstring& filename);
+
+    // Check space and switch target; returns true if space available, false if auto-paused
+    bool check_space_and_switch(const Config& config);
+
+    // Filesystem detection helper (uses SectorReader directly for boot sector reads)
+    enum class FileSystemType { Unknown, NTFS, FAT12, FAT16, FAT32, ExFAT };
+    FileSystemType detect_filesystem(SectorReader& reader, uint64_t start_sector);
 
     std::thread worker_;
     std::atomic<bool> running_{false};
@@ -106,7 +125,8 @@ private:
     std::unordered_map<std::wstring, uint32_t> ext_counters_;
     std::unordered_map<std::wstring, uint32_t> ext_subfolders_;
 
-    std::function<void(const Progress&)> on_progress_;
+    // Store config for callbacks
+    Config active_config_;
 };
 
 } // namespace disk_recover

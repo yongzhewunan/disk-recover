@@ -40,7 +40,23 @@ std::wstring MultiTargetWriter::current_target() const {
 
 bool MultiTargetWriter::has_space(uint64_t required_bytes) const {
     if (current_ >= targets_.size()) return false;
-    return targets_[current_].free_bytes >= required_bytes;
+    // Check both the required bytes AND the minimum free space threshold
+    return targets_[current_].free_bytes >= required_bytes &&
+           targets_[current_].free_bytes >= min_free_space_;
+}
+
+uint64_t MultiTargetWriter::write(const uint8_t* data, uint64_t size) {
+    if (current_ >= targets_.size()) return 0;
+
+    if (!has_space(size) && auto_switch_) {
+        if (!switch_to_next_target()) return 0;
+    }
+
+    DWORD written = 0;
+    HANDLE h = static_cast<HANDLE>(file_handle_);
+    if (!h) return 0;
+    WriteFile(h, data, static_cast<DWORD>(size), &written, nullptr);
+    return written;
 }
 
 bool MultiTargetWriter::open_file(const std::wstring& relative_path) {
@@ -70,25 +86,12 @@ void MultiTargetWriter::close_file() {
     }
 }
 
-uint64_t MultiTargetWriter::write(const uint8_t* data, uint64_t size) {
-    if (current_ >= targets_.size()) return 0;
-
-    if (!has_space(size) && auto_switch_) {
-        if (!switch_to_next_target()) return 0;
-    }
-
-    DWORD written = 0;
-    HANDLE h = static_cast<HANDLE>(file_handle_);
-    if (!h) return 0;
-    WriteFile(h, data, static_cast<DWORD>(size), &written, nullptr);
-    return written;
-}
-
 bool MultiTargetWriter::switch_to_next_target() {
     for (size_t i = 0; i < targets_.size(); ++i) {
         size_t next = (current_ + 1 + i) % targets_.size();
         refresh_space_info();
-        if (targets_[next].free_bytes > 0) {
+        // Only switch to a target that has at least min_free_space_ free
+        if (targets_[next].free_bytes >= min_free_space_) {
             current_ = next;
             return true;
         }

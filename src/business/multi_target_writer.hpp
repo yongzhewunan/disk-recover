@@ -22,6 +22,11 @@ public:
     bool auto_switch_enabled() const { return auto_switch_; }
     void set_auto_switch(bool enabled) { auto_switch_ = enabled; }
 
+    // Minimum free space threshold for has_space() and switch_to_next_target()
+    // Default: 2GB. Targets with less free space are considered "full".
+    void set_min_free_space(uint64_t bytes) { min_free_space_ = bytes; }
+    uint64_t min_free_space() const { return min_free_space_; }
+
     uint64_t write(const uint8_t* data, uint64_t size);
     bool open_file(const std::wstring& relative_path);
     void close_file();
@@ -31,10 +36,10 @@ public:
     size_t current_index() const { return current_; }
 
 private:
-
     std::vector<TargetDisk> targets_;
     size_t current_ = 0;
     bool auto_switch_ = true;
+    uint64_t min_free_space_ = 2ULL * 1024 * 1024 * 1024;  // 2GB default
     void* file_handle_ = nullptr;
 };
 

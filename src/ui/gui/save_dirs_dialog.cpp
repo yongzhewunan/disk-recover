@@ -4,6 +4,7 @@
 #include <windowsx.h>
 #include <shlobj.h>
 #include <commctrl.h>
+#include <winioctl.h>
 #include <algorithm>
 
 namespace disk_recover {
@@ -16,6 +17,8 @@ struct DialogData {
 };
 
 static const wchar_t* SAVE_DIRS_CLASS = L"SaveDirsDialogClass";
+
+static const uint64_t MIN_FREE_SPACE_THRESHOLD = 2ULL * 1024 * 1024 * 1024;  // 2GB
 
 static std::wstring FormatSize(uint64_t bytes) {
     wchar_t buf[64];
@@ -39,7 +42,10 @@ static void RefreshListItems(HWND hList, std::vector<SaveDirEntry>& dirs) {
         if (GetDiskFreeSpaceExW(entry.path.c_str(), &freeBytes, nullptr, nullptr)) {
             entry.free_bytes = freeBytes.QuadPart;
         }
-        std::wstring display = entry.path + L"  (" + FormatSize(entry.free_bytes) + L" 可用)";
+        std::wstring display = entry.path + L"  (" + FormatSize(entry.free_bytes) + L" free)";
+        if (entry.free_bytes < MIN_FREE_SPACE_THRESHOLD) {
+            display += L"  [LOW SPACE]";
+        }
         ListBox_AddString(hList, display.c_str());
     }
 }
@@ -51,6 +57,61 @@ static bool IsExcludedDrive(const std::wstring& path, const std::vector<wchar_t>
         if (towupper(e) == letter) return true;
     }
     return false;
+}
+
+// Check if two paths are on the same physical disk
+static bool IsSamePhysicalDisk(const std::wstring& path1, const std::wstring& path2) {
+    if (path1.size() < 2 || path2.size() < 2 || path1[1] != L':' || path2[1] != L':') return false;
+    wchar_t letter1 = towupper(path1[0]);
+    wchar_t letter2 = towupper(path2[0]);
+    if (letter1 == letter2) return true;  // Same drive letter = same disk
+
+    int disk1 = GetPhysicalDriveNumberForLetter(letter1);
+    int disk2 = GetPhysicalDriveNumberForLetter(letter2);
+    if (disk1 < 0 || disk2 < 0) return false;  // Can't determine, allow
+    return disk1 == disk2;
+}
+
+// Get physical drive number for a drive letter
+int GetPhysicalDriveNumberForLetter(wchar_t letter) {
+    std::wstring volume_path = L"\\\\.\\" + std::wstring(1, towupper(letter)) + L":";
+
+    HANDLE hVol = CreateFileW(
+        volume_path.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr);
+
+    if (hVol == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    DWORD buffer_size = sizeof(VOLUME_DISK_EXTENTS) + 31 * sizeof(DISK_EXTENT);
+    std::vector<uint8_t> buffer(buffer_size);
+    DWORD bytes_returned = 0;
+
+    BOOL ok = DeviceIoControl(
+        hVol,
+        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        nullptr, 0,
+        buffer.data(), buffer_size,
+        &bytes_returned,
+        nullptr);
+
+    CloseHandle(hVol);
+
+    if (!ok) {
+        return -1;
+    }
+
+    auto* extents = reinterpret_cast<VOLUME_DISK_EXTENTS*>(buffer.data());
+    if (extents->NumberOfDiskExtents > 0) {
+        return static_cast<int>(extents->Extents[0].DiskNumber);
+    }
+    return -1;
 }
 
 static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -74,22 +135,22 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         data->hList = hList;
 
         // Buttons
-        HWND hAdd = CreateWindowW(L"BUTTON", L"添加目录",
+        HWND hAdd = CreateWindowW(L"BUTTON", L"Add Directory",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            10, 270, 100, 30, hwnd, reinterpret_cast<HMENU>(1002), cs->hInstance, nullptr);
+            10, 270, 120, 30, hwnd, reinterpret_cast<HMENU>(1002), cs->hInstance, nullptr);
         SendMessageW(hAdd, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
-        HWND hRemove = CreateWindowW(L"BUTTON", L"删除",
+        HWND hRemove = CreateWindowW(L"BUTTON", L"Remove",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            120, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(1003), cs->hInstance, nullptr);
+            140, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(1003), cs->hInstance, nullptr);
         SendMessageW(hRemove, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
-        HWND hOk = CreateWindowW(L"BUTTON", L"确定",
+        HWND hOk = CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
             270, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(IDOK), cs->hInstance, nullptr);
         SendMessageW(hOk, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
 
-        HWND hCancel = CreateWindowW(L"BUTTON", L"取消",
+        HWND hCancel = CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             360, 270, 80, 30, hwnd, reinterpret_cast<HMENU>(IDCANCEL), cs->hInstance, nullptr);
         SendMessageW(hCancel, WM_SETFONT, reinterpret_cast<WPARAM>(hFont), TRUE);
@@ -103,7 +164,7 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Add directory
             BROWSEINFOW bi = {};
             bi.hwndOwner = hwnd;
-            bi.lpszTitle = L"选择保存目录";
+            bi.lpszTitle = L"Select save directory";
             bi.ulFlags = BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON;
             LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
             if (pidl) {
@@ -112,9 +173,9 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     std::wstring selPath(path);
                     if (selPath.back() != L'\\') selPath += L'\\';
 
-                    // Check excluded
+                    // Check excluded (source disk)
                     if (IsExcludedDrive(selPath, data->excluded_letters)) {
-                        MessageBoxW(hwnd, L"不能将文件保存到正在扫描的磁盘！", L"提示", MB_OK | MB_ICONWARNING);
+                        MessageBoxW(hwnd, L"Cannot save files to the disk being scanned!", L"Warning", MB_OK | MB_ICONWARNING);
                     } else {
                         // Check duplicate
                         bool dup = false;
@@ -124,15 +185,29 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                                 break;
                             }
                         }
-                        if (!dup) {
-                            SaveDirEntry entry;
-                            entry.path = selPath;
-                            ULARGE_INTEGER freeBytes;
-                            if (GetDiskFreeSpaceExW(selPath.c_str(), &freeBytes, nullptr, nullptr)) {
-                                entry.free_bytes = freeBytes.QuadPart;
+                        if (dup) {
+                            MessageBoxW(hwnd, L"This directory is already selected.", L"Warning", MB_OK | MB_ICONWARNING);
+                        } else {
+                            // Check per-physical-disk limit
+                            bool same_disk = false;
+                            for (auto& d : data->dirs) {
+                                if (IsSamePhysicalDisk(selPath, d.path)) {
+                                    same_disk = true;
+                                    break;
+                                }
                             }
-                            data->dirs.push_back(entry);
-                            RefreshListItems(data->hList, data->dirs);
+                            if (same_disk) {
+                                MessageBoxW(hwnd, L"Each physical disk can only have one save directory selected.", L"Warning", MB_OK | MB_ICONWARNING);
+                            } else {
+                                SaveDirEntry entry;
+                                entry.path = selPath;
+                                ULARGE_INTEGER freeBytes;
+                                if (GetDiskFreeSpaceExW(selPath.c_str(), &freeBytes, nullptr, nullptr)) {
+                                    entry.free_bytes = freeBytes.QuadPart;
+                                }
+                                data->dirs.push_back(entry);
+                                RefreshListItems(data->hList, data->dirs);
+                            }
                         }
                     }
                 }
@@ -154,7 +229,7 @@ static LRESULT CALLBACK SaveDirsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case IDOK: {
             // OK
             if (data->dirs.empty()) {
-                MessageBoxW(hwnd, L"请至少选择一个保存目录", L"提示", MB_OK | MB_ICONWARNING);
+                MessageBoxW(hwnd, L"Please select at least one save directory.", L"Warning", MB_OK | MB_ICONWARNING);
                 return 0;
             }
             *data->out_dirs = data->dirs;
@@ -208,7 +283,7 @@ bool SaveDirsDialog::Show(HWND parent_hwnd,
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         SAVE_DIRS_CLASS,
-        L"选择保存目录",
+        L"Select Save Directories",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, 470, 350,
         parent_hwnd, nullptr, hInst, &dialogData);

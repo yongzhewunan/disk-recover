@@ -2,9 +2,13 @@
 #include "disk_info.hpp"
 #include "signature_scanner.hpp"
 #include "../disk-io/buffered_reader.hpp"
+#include "../filesystem/ntfs/mft_parser.hpp"
+#include "../filesystem/fat/fat_parser.hpp"
+#include "../filesystem/exfat/exfat_parser.hpp"
 #include "../common/logger.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <cstring>
 
 namespace disk_recover {
 
@@ -23,6 +27,9 @@ bool ScanAndRecoverManager::start(const Config& config) {
     paused_ = false;
     stop_requested_ = false;
     progress_ = {};
+    ext_counters_.clear();
+    ext_subfolders_.clear();
+    active_config_ = config;
 
     worker_ = std::thread(&ScanAndRecoverManager::worker_thread, this, config);
     return true;
@@ -140,6 +147,22 @@ bool ScanAndRecoverManager::recover_file(const RecoverableFile& file, BufferedSe
         }
     }
 
+    // Check space and switch if needed
+    if (!check_space_and_switch(active_config_)) {
+        // Auto-paused due to low space - wait for resume
+        while (paused_.load() && !stop_requested_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (stop_requested_.load()) return false;
+
+        // Re-check space after resume
+        writer_.refresh_space_info();
+        if (!writer_.has_space(active_config_.min_free_space)) {
+            LOG_MSG(L"[ScanRecover] Still no space after resume, skipping file");
+            return false;
+        }
+    }
+
     // Write file
     HANDLE hFile = CreateFileW(output_path.c_str(), GENERIC_WRITE,
                                FILE_SHARE_READ, nullptr, CREATE_NEW,
@@ -158,11 +181,97 @@ bool ScanAndRecoverManager::recover_file(const RecoverableFile& file, BufferedSe
 
     if (!ok || bytes_written != file_buffer.size()) {
         LOG_FMT(L"[ScanRecover] Failed to write file: %s", output_path.c_str());
+        DeleteFileW(output_path.c_str());
         return false;
     }
 
     LOG_FMT(L"[ScanRecover] Recovered: %s (%llu bytes)", output_path.c_str(), file_buffer.size());
+
+    // Notify callback of recovered file
+    if (active_config_.on_file_recovered) {
+        active_config_.on_file_recovered(file, output_path);
+    }
+
     return true;
+}
+
+bool ScanAndRecoverManager::check_space_and_switch(const Config& config) {
+    writer_.refresh_space_info();
+
+    if (writer_.has_space(config.min_free_space)) {
+        return true;
+    }
+
+    // Try to switch to next target
+    if (writer_.switch_to_next_target()) {
+        LOG_FMT(L"[ScanRecover] Switched to target: %s", writer_.current_target().c_str());
+        return true;
+    }
+
+    // All targets lack space - auto-pause
+    LOG_MSG(L"[ScanRecover] All save directories have less than 2GB free space - auto-pausing");
+    paused_ = true;
+
+    if (config.hwnd) {
+        PostMessageW(config.hwnd, SRM_WM_SCAN_RECOVER_PAUSED, 0, 0);
+    }
+
+    return false;
+}
+
+// Detect filesystem type from boot sector
+ScanAndRecoverManager::FileSystemType ScanAndRecoverManager::detect_filesystem(SectorReader& reader, uint64_t start_sector) {
+    AlignedBuffer buf(reader.sector_size(), reader.sector_size());
+    if (!reader.read_sectors(start_sector, 1, buf)) {
+        return FileSystemType::Unknown;
+    }
+
+    const uint8_t* data = buf.data();
+
+    // Check MBR signature
+    uint16_t signature = *reinterpret_cast<const uint16_t*>(data + 510);
+    if (signature != 0xAA55) {
+        return FileSystemType::Unknown;
+    }
+
+    // Check exFAT
+    const char exfat_id[] = "EXFAT   ";
+    if (std::memcmp(data + 3, exfat_id, 8) == 0) {
+        return FileSystemType::ExFAT;
+    }
+
+    // Check NTFS
+    const char ntfs_id[] = "NTFS    ";
+    if (std::memcmp(data + 3, ntfs_id, 8) == 0) {
+        return FileSystemType::NTFS;
+    }
+
+    // Check FAT
+    uint16_t bytes_per_sector = *reinterpret_cast<const uint16_t*>(data + 11);
+    uint8_t sectors_per_cluster = data[13];
+
+    if (bytes_per_sector == 0 || bytes_per_sector % 512 != 0 ||
+        sectors_per_cluster == 0 || (sectors_per_cluster & (sectors_per_cluster - 1)) != 0) {
+        return FileSystemType::Unknown;
+    }
+
+    uint16_t reserved_sectors = *reinterpret_cast<const uint16_t*>(data + 14);
+    uint8_t fat_count = data[16];
+    uint16_t root_entry_count = *reinterpret_cast<const uint16_t*>(data + 17);
+    uint16_t sectors_per_fat_16 = *reinterpret_cast<const uint16_t*>(data + 22);
+    uint32_t total_sectors_16 = *reinterpret_cast<const uint16_t*>(data + 19);
+    uint32_t total_sectors_32 = *reinterpret_cast<const uint32_t*>(data + 32);
+
+    uint32_t total_sectors = total_sectors_16 != 0 ? total_sectors_16 : total_sectors_32;
+    uint32_t fat_size = sectors_per_fat_16 != 0 ? sectors_per_fat_16 : *reinterpret_cast<const uint32_t*>(data + 36);
+
+    uint32_t root_dir_sectors = ((root_entry_count * 32) + bytes_per_sector - 1) / bytes_per_sector;
+    uint32_t data_sectors = total_sectors - (reserved_sectors + (fat_count * fat_size) + root_dir_sectors);
+    uint32_t total_clusters = data_sectors / sectors_per_cluster;
+
+    if (total_clusters < 4085) return FileSystemType::FAT12;
+    if (total_clusters < 65525) return FileSystemType::FAT16;
+    return FileSystemType::FAT32;
 }
 
 void ScanAndRecoverManager::worker_thread(Config config) {
@@ -174,7 +283,8 @@ void ScanAndRecoverManager::worker_thread(Config config) {
         running_ = false;
         Progress p{};
         p.is_complete = true;
-        if (on_progress_) on_progress_(p);
+        if (config.on_progress) config.on_progress(p);
+        if (config.hwnd) PostMessageW(config.hwnd, SRM_WM_SCAN_RECOVER_COMPLETE, 0, 0);
         return;
     }
 
@@ -189,61 +299,39 @@ void ScanAndRecoverManager::worker_thread(Config config) {
     uint64_t start_sector = config.start_sector;
     uint64_t end_sector = (config.end_sector > 0) ? config.end_sector : geo.total_sectors;
 
-    // Handle resume from previous position
-    uint64_t resume_sector = config.resume_from_sector;
-    if (resume_sector > start_sector && resume_sector < end_sector) {
-        // Adjust start sector for resume, with overlap for safety
-        start_sector = (resume_sector > 64) ? (resume_sector - 64) : start_sector;
-        LOG_FMT(L"[ScanRecover] Resuming from sector %llu (adjusted start: %llu)",
-                 resume_sector, start_sector);
-    }
-
     {
         std::lock_guard lock(progress_mutex_);
-        progress_.total_sectors = end_sector - config.start_sector;  // Total from original start
-        if (resume_sector > config.start_sector) {
-            // Set initial progress for resume
-            progress_.sectors_scanned = resume_sector - config.start_sector;
-            progress_.current_sector = resume_sector;
-        }
+        progress_.total_sectors = end_sector - start_sector;
     }
 
-    // Create sector reader with optimizations (using 128MB buffer)
+    // Create sector reader with optimizations
     BufferedSectorReader reader(handle, geo.sector_size, 16 * 1024 * 1024);
     reader.set_bad_sector_policy(config.bad_sector_policy);
     reader.set_skip_ahead_config(config.skip_config);
     reader.set_timeout_config(config.timeout_config);
 
+    // Create a separate SectorReader for metadata parsing (filesystem parsers need SectorReader&)
+    SectorReader meta_reader(handle, geo.sector_size);
+
     // Prepare output directory
     if (config.output_dirs.empty()) {
         LOG_MSG(L"[ScanRecover] No output directories specified");
         running_ = false;
+        if (config.hwnd) PostMessageW(config.hwnd, SRM_WM_SCAN_RECOVER_COMPLETE, 0, 0);
         return;
     }
 
-    // Create output directories
+    // Create output directories and setup MultiTargetWriter
     for (const auto& dir : config.output_dirs) {
         std::filesystem::create_directories(dir);
         LOG_FMT(L"[ScanRecover] Output directory: %s", dir.c_str());
+        writer_.add_target(dir);
     }
+    writer_.set_auto_switch(true);
+    writer_.set_min_free_space(config.min_free_space);
 
-    const std::wstring& primary_output = config.output_dirs[0];
-
-    // Configure signature scanner
-    SignatureScanner::ScanConfig scan_config{};
-    scan_config.start_sector = start_sector;
-    scan_config.end_sector = end_sector;
-    scan_config.scan_images = config.scan_images;
-    scan_config.scan_videos = config.scan_videos;
-    scan_config.should_stop = [this]() { return stop_requested_.load(); };
-    scan_config.resume_from_sector = resume_sector;  // Pass resume position
-
-    SignatureScanner scanner;
-
-    uint32_t total_skipped = 0;
-    auto last_progress_time = std::chrono::steady_clock::now();
-
-    auto on_file_found = [this, &reader, &primary_output, &config](RecoverableFile&& file) {
+    // Callback for recovering found files
+    auto on_file_found = [this, &reader](RecoverableFile&& file) {
         // Wait if paused
         while (paused_.load() && !stop_requested_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -251,8 +339,11 @@ void ScanAndRecoverManager::worker_thread(Config config) {
 
         if (stop_requested_.load()) return;
 
+        // Get current target from writer
+        std::wstring output_dir = writer_.current_target();
+
         // Immediately recover the file
-        bool success = recover_file(file, reader, primary_output);
+        bool success = recover_file(file, reader, output_dir);
 
         {
             std::lock_guard lock(progress_mutex_);
@@ -272,6 +363,9 @@ void ScanAndRecoverManager::worker_thread(Config config) {
         }
     };
 
+    uint32_t total_skipped = 0;
+    auto last_progress_time = std::chrono::steady_clock::now();
+
     auto on_scan_progress = [this, &reader, &total_skipped, &last_progress_time, &config](const ScanProgress& scan_p) {
         // Wait if paused
         while (paused_.load() && !stop_requested_.load()) {
@@ -287,7 +381,6 @@ void ScanAndRecoverManager::worker_thread(Config config) {
             progress_.sectors_scanned = scan_p.sectors_scanned;
             progress_.bad_sectors = scan_p.bad_sectors_hit;
             progress_.sectors_skipped = total_skipped + skip_ahead;
-            // Use original config.start_sector for accurate position tracking
             progress_.current_sector = config.start_sector + scan_p.sectors_scanned;
 
             if (progress_.total_sectors > 0) {
@@ -311,13 +404,172 @@ void ScanAndRecoverManager::worker_thread(Config config) {
             reader.reset_bad_sector_counter();
         }
 
-        if (on_progress_) on_progress_(progress_);
+        if (config.on_progress) config.on_progress(progress_);
     };
 
-    LOG_FMT(L"[ScanRecover] Starting RAW scan: sector %llu to %llu",
-             start_sector, end_sector);
+    // --- Scan Mode Dispatch ---
+    switch (config.mode) {
+    case ScanMode::Quick: {
+        LOG_MSG(L"[ScanRecover] Quick scan mode (partition table only)");
+        FileSystemType fs_type = detect_filesystem(meta_reader, start_sector);
+        LOG_FMT(L"[ScanRecover] Detected file system type: %d", static_cast<int>(fs_type));
 
-    scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
+        switch (fs_type) {
+        case FileSystemType::NTFS: {
+            ntfs::MftParser parser;
+            if (parser.parse_boot_sector(meta_reader, start_sector)) {
+                LOG_MSG(L"[ScanRecover] Parsing NTFS MFT...");
+                parser.enumerate_mft(meta_reader, on_file_found, true,
+                    [this]() { return stop_requested_.load(); });
+                {
+                    std::lock_guard lock(progress_mutex_);
+                    progress_.sectors_scanned = progress_.total_sectors;
+                    progress_.percent = 100;
+                }
+                LOG_FMT(L"[ScanRecover] NTFS scan done, files_found=%u", progress_.files_found);
+            } else {
+                LOG_MSG(L"[ScanRecover] Failed to parse NTFS boot sector");
+            }
+            break;
+        }
+
+        case FileSystemType::FAT12:
+        case FileSystemType::FAT16:
+        case FileSystemType::FAT32: {
+            fat::FatParser parser;
+            if (parser.parse_boot_sector(meta_reader, start_sector)) {
+                LOG_MSG(L"[ScanRecover] Parsing FAT root directory...");
+                parser.enumerate_root_dir(meta_reader, on_file_found, true,
+                    [this]() { return stop_requested_.load(); });
+                {
+                    std::lock_guard lock(progress_mutex_);
+                    progress_.sectors_scanned = progress_.total_sectors;
+                    progress_.percent = 100;
+                }
+                LOG_FMT(L"[ScanRecover] FAT scan done, files_found=%u", progress_.files_found);
+            } else {
+                LOG_MSG(L"[ScanRecover] Failed to parse FAT boot sector");
+            }
+            break;
+        }
+
+        case FileSystemType::ExFAT:
+            LOG_MSG(L"[ScanRecover] exFAT detected - using RAW scan fallback");
+            {
+                SignatureScanner scanner;
+                SignatureScanner::ScanConfig scan_config{};
+                scan_config.start_sector = start_sector;
+                scan_config.end_sector = end_sector;
+                scan_config.scan_images = config.scan_images;
+                scan_config.scan_videos = config.scan_videos;
+                scan_config.should_stop = [this]() { return stop_requested_.load(); };
+                scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
+            }
+            break;
+
+        case FileSystemType::Unknown:
+            LOG_MSG(L"[ScanRecover] Unknown file system - performing RAW scan");
+            {
+                SignatureScanner scanner;
+                SignatureScanner::ScanConfig scan_config{};
+                scan_config.start_sector = start_sector;
+                scan_config.end_sector = end_sector;
+                scan_config.scan_images = config.scan_images;
+                scan_config.scan_videos = config.scan_videos;
+                scan_config.should_stop = [this]() { return stop_requested_.load(); };
+                scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
+            }
+            break;
+        }
+        break;
+    }
+
+    case ScanMode::Deep: {
+        LOG_MSG(L"[ScanRecover] Deep scan mode (partition table + raw)");
+        FileSystemType fs_type = detect_filesystem(meta_reader, start_sector);
+        LOG_FMT(L"[ScanRecover] Detected file system type: %d", static_cast<int>(fs_type));
+        uint64_t metadata_end_sector = 0;
+
+        // Phase 1: metadata scan
+        switch (fs_type) {
+        case FileSystemType::NTFS: {
+            ntfs::MftParser parser;
+            if (parser.parse_boot_sector(meta_reader, start_sector)) {
+                LOG_MSG(L"[ScanRecover] Phase 1: Parsing NTFS MFT...");
+                parser.enumerate_mft(meta_reader, on_file_found, true,
+                    [this]() { return stop_requested_.load(); });
+                metadata_end_sector = parser.mft_start_sector() +
+                    (geo.total_sectors / parser.mft_record_size());
+                {
+                    std::lock_guard lock(progress_mutex_);
+                    progress_.sectors_scanned = metadata_end_sector;
+                    if (progress_.total_sectors > 0) {
+                        progress_.percent = static_cast<uint8_t>(
+                            100 * progress_.sectors_scanned / progress_.total_sectors);
+                    }
+                }
+                if (config.on_progress) config.on_progress(progress_);
+            }
+            break;
+        }
+
+        case FileSystemType::FAT12:
+        case FileSystemType::FAT16:
+        case FileSystemType::FAT32: {
+            fat::FatParser parser;
+            if (parser.parse_boot_sector(meta_reader, start_sector)) {
+                LOG_MSG(L"[ScanRecover] Phase 1: Parsing FAT root directory...");
+                parser.enumerate_root_dir(meta_reader, on_file_found, true,
+                    [this]() { return stop_requested_.load(); });
+                metadata_end_sector = parser.data_start_sector();
+                {
+                    std::lock_guard lock(progress_mutex_);
+                    progress_.sectors_scanned = metadata_end_sector;
+                    if (progress_.total_sectors > 0) {
+                        progress_.percent = static_cast<uint8_t>(
+                            100 * progress_.sectors_scanned / progress_.total_sectors);
+                    }
+                }
+                if (config.on_progress) config.on_progress(progress_);
+            }
+            break;
+        }
+
+        case FileSystemType::ExFAT:
+        case FileSystemType::Unknown:
+            metadata_end_sector = start_sector;
+            break;
+        }
+
+        // Phase 2: RAW scan
+        if (metadata_end_sector < end_sector && !stop_requested_.load()) {
+            LOG_FMT(L"[ScanRecover] Phase 2: RAW scan sectors %llu to %llu",
+                     metadata_end_sector, end_sector);
+            SignatureScanner scanner;
+            SignatureScanner::ScanConfig scan_config{};
+            scan_config.start_sector = metadata_end_sector;
+            scan_config.end_sector = end_sector;
+            scan_config.scan_images = config.scan_images;
+            scan_config.scan_videos = config.scan_videos;
+            scan_config.should_stop = [this]() { return stop_requested_.load(); };
+            scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
+        }
+        break;
+    }
+
+    case ScanMode::Full: {
+        LOG_MSG(L"[ScanRecover] Full scan mode - entire disk RAW scan");
+        SignatureScanner scanner;
+        SignatureScanner::ScanConfig scan_config{};
+        scan_config.start_sector = start_sector;
+        scan_config.end_sector = end_sector;
+        scan_config.scan_images = config.scan_images;
+        scan_config.scan_videos = config.scan_videos;
+        scan_config.should_stop = [this]() { return stop_requested_.load(); };
+        scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
+        break;
+    }
+    }
 
     // Final progress
     {
@@ -332,7 +584,8 @@ void ScanAndRecoverManager::worker_thread(Config config) {
              progress_.bytes_recovered, progress_.bad_sectors, progress_.sectors_skipped);
 
     running_ = false;
-    if (on_progress_) on_progress_(progress_);
+    if (config.on_progress) config.on_progress(progress_);
+    if (config.hwnd) PostMessageW(config.hwnd, SRM_WM_SCAN_RECOVER_COMPLETE, 0, 0);
 }
 
 } // namespace disk_recover

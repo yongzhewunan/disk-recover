@@ -4,6 +4,7 @@
 #include "disk-io/disk_handle.hpp"
 #include "disk-io/disk_info.hpp"
 #include "filesystem/raw/signature_scanner.hpp"
+#include "ui/gui/save_dirs_dialog.hpp"
 #include "common/logger.hpp"
 #include <shlobj.h>
 #include <algorithm>
@@ -11,8 +12,8 @@
 namespace disk_recover {
 
 static const wchar_t CLASS_NAME[] = L"DiskRecoverMainWindow";
-static const int WIN_WIDTH = 900;
-static const int WIN_HEIGHT = 600;
+static const int WIN_WIDTH = 960;
+static const int WIN_HEIGHT = 700;
 
 static std::wstring FormatFileSize(uint64_t bytes) {
     wchar_t buf[64];
@@ -35,8 +36,9 @@ static std::string GenerateSessionId() {
 
 MainWindow::MainWindow() = default;
 MainWindow::~MainWindow() {
-    stop_operation();
-    if (worker_thread_.joinable()) worker_thread_.join();
+    if (manager_) {
+        manager_->stop();
+    }
 }
 
 bool MainWindow::create(HINSTANCE hInst) {
@@ -94,11 +96,40 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
         int id = LOWORD(wp);
         switch (id) {
-        case IDC_BTN_SCAN:         on_scan(); break;
-        case IDC_BTN_RECOVER:      on_recover(); break;
-        case IDC_BTN_SCAN_RECOVER: on_scan_recover(); break;
-        case IDC_BTN_STOP:         on_stop(); break;
-        case IDC_BTN_BROWSE:       on_browse_output(); break;
+        case IDC_BTN_START:    on_start_pause(); break;
+        case IDC_BTN_STOP:     on_stop(); break;
+        case IDC_BTN_SAVE_DIRS: on_save_dirs(); break;
+        }
+        break;
+    }
+    case WM_FILE_RECOVERED: {
+        // wp = pointer to FileRecoveredData (heap-allocated, we must delete)
+        auto* data = reinterpret_cast<FileRecoveredData*>(wp);
+        if (data) {
+            add_file_to_list(data->file, data->save_path);
+            delete data;
+        }
+        break;
+    }
+    case WM_SCAN_RECOVER_PAUSED: {
+        state_ = State::Paused;
+        SetWindowTextW(h_btn_start_, L"Continue");
+        set_status(L"All save directories have less than 2GB free space. Please add directories or free up space, then click Continue.");
+        break;
+    }
+    case WM_SCAN_RECOVER_COMPLETE: {
+        state_ = State::Idle;
+        SetWindowTextW(h_btn_start_, L"Start");
+        enable_config_controls(true);
+
+        if (manager_) {
+            auto p = manager_->progress();
+            wchar_t text[256];
+            _snwprintf_s(text, _TRUNCATE,
+                L"Complete! Found: %u | Recovered: %u | Failed: %u | Size: %s",
+                p.files_found, p.files_recovered, p.files_failed,
+                FormatFileSize(p.bytes_recovered).c_str());
+            set_status(text);
         }
         break;
     }
@@ -106,12 +137,14 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
         if (h_list_files_) {
             RECT rc;
             GetClientRect(hwnd_, &rc);
-            MoveWindow(h_list_files_, 10, 100, rc.right - 20, rc.bottom - 160, TRUE);
+            MoveWindow(h_list_files_, 10, 140, rc.right - 20, rc.bottom - 200, TRUE);
         }
         break;
     }
     case WM_DESTROY:
-        stop_operation();
+        if (manager_) {
+            manager_->stop();
+        }
         PostQuitMessage(0);
         break;
     default:
@@ -121,65 +154,123 @@ LRESULT MainWindow::handle_message(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void MainWindow::create_controls() {
+    HFONT hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+
+    // --- Row 1 (y=10): Drive, Scan Mode, Filters ---
     // Drive selector
     CreateWindowExW(0, L"STATIC", L"Drive:",
         WS_VISIBLE | WS_CHILD | SS_RIGHT,
-        10, 12, 50, 22, hwnd_, nullptr, hInst_, nullptr);
+        10, 14, 50, 20, hwnd_, nullptr, hInst_, nullptr);
 
     h_combo_drives_ = CreateWindowExW(0, WC_COMBOBOX, L"",
         WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         65, 10, 200, 300, hwnd_, (HMENU)IDC_CB_DRIVES, hInst_, nullptr);
+    SendMessageW(h_combo_drives_, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Scan button
-    h_btn_scan_ = CreateWindowExW(0, L"BUTTON", L"Scan",
+    // Scan mode
+    CreateWindowExW(0, L"STATIC", L"Mode:",
+        WS_VISIBLE | WS_CHILD | SS_RIGHT,
+        280, 14, 40, 20, hwnd_, nullptr, hInst_, nullptr);
+
+    h_cb_scan_mode_ = CreateWindowExW(0, WC_COMBOBOX, L"",
+        WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        325, 10, 220, 300, hwnd_, (HMENU)IDC_CB_SCAN_MODE, hInst_, nullptr);
+    SendMessageW(h_cb_scan_mode_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_cb_scan_mode_, CB_ADDSTRING, 0, (LPARAM)L"Quick (Partition Table)");
+    SendMessageW(h_cb_scan_mode_, CB_ADDSTRING, 0, (LPARAM)L"Deep (Partition Table + Raw)");
+    SendMessageW(h_cb_scan_mode_, CB_ADDSTRING, 0, (LPARAM)L"Full (Raw Only)");
+    SendMessageW(h_cb_scan_mode_, CB_SETCURSEL, 1, 0);  // Default: Deep
+
+    // Image/Video checkboxes
+    h_chk_images_ = CreateWindowExW(0, L"BUTTON", L"Images",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        560, 12, 80, 22, hwnd_, (HMENU)IDC_CHK_IMAGES, hInst_, nullptr);
+    SendMessageW(h_chk_images_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_chk_images_, BM_SETCHECK, BST_CHECKED, 0);
+
+    h_chk_videos_ = CreateWindowExW(0, L"BUTTON", L"Videos",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        645, 12, 80, 22, hwnd_, (HMENU)IDC_CHK_VIDEOS, hInst_, nullptr);
+    SendMessageW(h_chk_videos_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_chk_videos_, BM_SETCHECK, BST_CHECKED, 0);
+
+    // --- Row 2 (y=42): Sector range ---
+    CreateWindowExW(0, L"STATIC", L"Start:",
+        WS_VISIBLE | WS_CHILD | SS_RIGHT,
+        10, 46, 50, 20, hwnd_, nullptr, hInst_, nullptr);
+
+    h_ed_start_sector_ = CreateWindowExW(0, L"EDIT", L"0",
+        WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+        65, 44, 100, 22, hwnd_, (HMENU)IDC_ED_START_SECTOR, hInst_, nullptr);
+    SendMessageW(h_ed_start_sector_, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    CreateWindowExW(0, L"STATIC", L"End:",
+        WS_VISIBLE | WS_CHILD | SS_RIGHT,
+        175, 46, 40, 20, hwnd_, nullptr, hInst_, nullptr);
+
+    h_ed_end_sector_ = CreateWindowExW(0, L"EDIT", L"0",
+        WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER,
+        220, 44, 100, 22, hwnd_, (HMENU)IDC_ED_END_SECTOR, hInst_, nullptr);
+    SendMessageW(h_ed_end_sector_, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    CreateWindowExW(0, L"STATIC", L"(0 = full disk)",
+        WS_VISIBLE | WS_CHILD,
+        325, 46, 100, 20, hwnd_, nullptr, hInst_, nullptr);
+
+    h_rb_sector_abs_ = CreateWindowExW(0, L"BUTTON", L"Absolute",
+        WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
+        440, 44, 80, 22, hwnd_, (HMENU)IDC_RB_SECTOR_ABS, hInst_, nullptr);
+    SendMessageW(h_rb_sector_abs_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_rb_sector_abs_, BM_SETCHECK, BST_CHECKED, 0);
+
+    h_rb_sector_pct_ = CreateWindowExW(0, L"BUTTON", L"Percentage %",
+        WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON,
+        525, 44, 110, 22, hwnd_, (HMENU)IDC_RB_SECTOR_PCT, hInst_, nullptr);
+    SendMessageW(h_rb_sector_pct_, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // --- Row 3 (y=74): Save directories ---
+    CreateWindowExW(0, L"STATIC", L"Save:",
+        WS_VISIBLE | WS_CHILD | SS_RIGHT,
+        10, 78, 50, 20, hwnd_, nullptr, hInst_, nullptr);
+
+    h_btn_save_dirs_ = CreateWindowExW(0, L"BUTTON", L"Save Dirs...",
         WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        280, 10, 80, 28, hwnd_, (HMENU)IDC_BTN_SCAN, hInst_, nullptr);
+        65, 74, 110, 26, hwnd_, (HMENU)IDC_BTN_SAVE_DIRS, hInst_, nullptr);
+    SendMessageW(h_btn_save_dirs_, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Scan & Recover button
-    h_btn_scan_recover_ = CreateWindowExW(0, L"BUTTON", L"Scan & Recover",
+    h_st_save_info_ = CreateWindowExW(0, L"STATIC", L"No save directory selected",
+        WS_VISIBLE | WS_CHILD | SS_LEFT,
+        185, 78, 500, 20, hwnd_, (HMENU)IDC_ST_SAVE_INFO, hInst_, nullptr);
+    SendMessageW(h_st_save_info_, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+    // --- Row 4 (y=106): Start/Pause and Stop ---
+    h_btn_start_ = CreateWindowExW(0, L"BUTTON", L"Start",
         WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        370, 10, 130, 28, hwnd_, (HMENU)IDC_BTN_SCAN_RECOVER, hInst_, nullptr);
+        65, 106, 120, 28, hwnd_, (HMENU)IDC_BTN_START, hInst_, nullptr);
+    SendMessageW(h_btn_start_, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Recover button
-    h_btn_recover_ = CreateWindowExW(0, L"BUTTON", L"Recover",
-        WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        510, 10, 80, 28, hwnd_, (HMENU)IDC_BTN_RECOVER, hInst_, nullptr);
-
-    // Stop button
     h_btn_stop_ = CreateWindowExW(0, L"BUTTON", L"Stop",
         WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_DISABLED,
-        600, 10, 70, 28, hwnd_, (HMENU)IDC_BTN_STOP, hInst_, nullptr);
+        195, 106, 80, 28, hwnd_, (HMENU)IDC_BTN_STOP, hInst_, nullptr);
+    SendMessageW(h_btn_stop_, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Output directory
-    CreateWindowExW(0, L"STATIC", L"Output:",
-        WS_VISIBLE | WS_CHILD | SS_RIGHT,
-        10, 50, 50, 22, hwnd_, nullptr, hInst_, nullptr);
-
-    h_ed_output_ = CreateWindowExW(0, L"EDIT", L"",
-        WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-        65, 48, 550, 24, hwnd_, nullptr, hInst_, nullptr);
-
-    h_btn_browse_ = CreateWindowExW(0, L"BUTTON", L"...",
-        WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        620, 48, 40, 24, hwnd_, (HMENU)IDC_BTN_BROWSE, hInst_, nullptr);
-
-    // File list (ListView)
+    // --- ListView ---
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icex);
 
     h_list_files_ = CreateWindowExW(0, WC_LISTVIEW, L"",
         WS_VISIBLE | WS_CHILD | LVS_REPORT | LVS_SINGLESEL | WS_BORDER,
-        10, 100, WIN_WIDTH - 20, WIN_HEIGHT - 200,
+        10, 140, WIN_WIDTH - 20, WIN_HEIGHT - 260,
         hwnd_, (HMENU)IDC_LV_FILES, hInst_, nullptr);
 
     ListView_SetExtendedListViewStyle(h_list_files_, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
     struct ColDef { const wchar_t* name; int width; };
     ColDef cols[] = {
-        { L"File Name", 300 },
+        { L"File Name", 280 },
         { L"Type", 60 },
         { L"Size", 100 },
-        { L"Sector", 100 },
+        { L"Save Path", 250 },
         { L"Status", 80 },
     };
     for (int i = 0; i < 5; ++i) {
@@ -191,16 +282,16 @@ void MainWindow::create_controls() {
         ListView_InsertColumn(h_list_files_, i, &col);
     }
 
-    // Progress bar
+    // --- Progress bar ---
     h_progress_ = CreateWindowExW(0, PROGRESS_CLASS, L"",
         WS_VISIBLE | WS_CHILD | PBS_SMOOTH,
-        10, WIN_HEIGHT - 90, WIN_WIDTH - 20, 20,
+        10, WIN_HEIGHT - 110, WIN_WIDTH - 20, 20,
         hwnd_, (HMENU)IDC_PB_PROGRESS, hInst_, nullptr);
 
-    // Status bar
+    // --- Status bar ---
     h_status_bar_ = CreateWindowExW(0, STATUSCLASSNAME, L"Ready",
         WS_VISIBLE | WS_CHILD | SBARS_SIZEGRIP,
-        0, WIN_HEIGHT - 60, WIN_WIDTH, 22,
+        0, WIN_HEIGHT - 80, WIN_WIDTH, 22,
         hwnd_, (HMENU)IDC_STATUS_BAR, hInst_, nullptr);
 }
 
@@ -220,211 +311,167 @@ void MainWindow::refresh_drive_list() {
     }
 }
 
-void MainWindow::on_scan() {
-    if (is_scanning_) return;
-    if (worker_thread_.joinable()) worker_thread_.join();
+void MainWindow::on_start_pause() {
+    switch (state_) {
+    case State::Idle: {
+        // Validate drive selection
+        int sel = static_cast<int>(SendMessageW(h_combo_drives_, CB_GETCURSEL, 0, 0));
+        if (sel < 0 || sel >= static_cast<int>(drives_.size())) {
+            MessageBoxW(hwnd_, L"Please select a drive.", L"Error", MB_OK);
+            return;
+        }
 
-    int sel = static_cast<int>(SendMessageW(h_combo_drives_, CB_GETCURSEL, 0, 0));
-    if (sel < 0 || sel >= static_cast<int>(drives_.size())) {
-        MessageBoxW(hwnd_, L"Please select a drive.", L"Error", MB_OK);
-        return;
+        // Validate save directories
+        if (save_dirs_.empty()) {
+            MessageBoxW(hwnd_, L"Please select at least one save directory.", L"Error", MB_OK);
+            on_save_dirs();
+            if (save_dirs_.empty()) return;
+        }
+
+        auto& drive = drives_[sel];
+
+        // Build config
+        ScanAndRecoverManager::Config config;
+        config.device_path = drive.device_path;
+        config.session_id = GenerateSessionId();
+
+        // Scan mode
+        int mode_sel = static_cast<int>(SendMessageW(h_cb_scan_mode_, CB_GETCURSEL, 0, 0));
+        switch (mode_sel) {
+        case 0: config.mode = ScanMode::Quick; break;
+        case 1: config.mode = ScanMode::Deep; break;
+        case 2: config.mode = ScanMode::Full; break;
+        default: config.mode = ScanMode::Deep; break;
+        }
+
+        // File type filters
+        config.scan_images = (SendMessageW(h_chk_images_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        config.scan_videos = (SendMessageW(h_chk_videos_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+        // Sector range
+        wchar_t buf_start[32] = {}, buf_end[32] = {};
+        GetWindowTextW(h_ed_start_sector_, buf_start, 32);
+        GetWindowTextW(h_ed_end_sector_, buf_end, 32);
+
+        uint64_t user_start = 0, user_end = 0;
+        if (wcslen(buf_start) > 0) user_start = _wtoi64(buf_start);
+        if (wcslen(buf_end) > 0) user_end = _wtoi64(buf_end);
+
+        bool is_pct = (SendMessageW(h_rb_sector_pct_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        uint64_t total_sectors = drive.geometry.total_sectors;
+
+        if (is_pct && total_sectors > 0) {
+            config.start_sector = user_start * total_sectors / 100;
+            config.end_sector = (user_end > 0) ? (user_end * total_sectors / 100) : 0;
+        } else {
+            config.start_sector = user_start;
+            config.end_sector = user_end;  // 0 = auto-detect full disk
+        }
+
+        // Output directories
+        for (const auto& sd : save_dirs_) {
+            config.output_dirs.push_back(sd.path);
+        }
+
+        // Min free space
+        config.min_free_space = 2ULL * 1024 * 1024 * 1024;  // 2GB
+
+        // HWND for PostMessage
+        config.hwnd = hwnd_;
+
+        // File recovered callback
+        config.on_file_recovered = [this](const RecoverableFile& file, const std::wstring& save_path) {
+            auto* data = new FileRecoveredData{file, save_path};
+            PostMessageW(hwnd_, WM_FILE_RECOVERED, reinterpret_cast<WPARAM>(data), 0);
+        };
+
+        // Progress callback
+        config.on_progress = [this](const ScanAndRecoverManager::Progress& p) {
+            update_progress(p);
+        };
+
+        // Clear previous results
+        ListView_DeleteAllItems(h_list_files_);
+
+        // Start
+        manager_ = std::make_unique<ScanAndRecoverManager>();
+        if (!manager_->start(config)) {
+            set_status(L"Failed to start scan & recover");
+            return;
+        }
+
+        state_ = State::Running;
+        SetWindowTextW(h_btn_start_, L"Pause");
+        EnableWindow(h_btn_stop_, TRUE);
+        enable_config_controls(false);
+        set_status(L"Scanning and recovering...");
+        break;
     }
 
-    found_files_.clear();
-    ListView_DeleteAllItems(h_list_files_);
-    enable_buttons(true);
-    is_scanning_ = true;
+    case State::Running:
+        // Pause
+        if (manager_) manager_->pause();
+        state_ = State::Paused;
+        SetWindowTextW(h_btn_start_, L"Continue");
+        set_status(L"Paused");
+        break;
 
-    auto& drive = drives_[sel];
-    worker_thread_ = std::thread([this, drive]() { do_scan(); });
-}
-
-void MainWindow::on_scan_recover() {
-    if (is_scanning_) return;
-    if (output_dir_.empty()) {
-        on_browse_output();
-        if (output_dir_.empty()) return;
+    case State::Paused:
+        // Resume
+        if (manager_) manager_->resume();
+        state_ = State::Running;
+        SetWindowTextW(h_btn_start_, L"Pause");
+        set_status(L"Resuming scan & recover...");
+        break;
     }
-    if (worker_thread_.joinable()) worker_thread_.join();
-
-    int sel = static_cast<int>(SendMessageW(h_combo_drives_, CB_GETCURSEL, 0, 0));
-    if (sel < 0 || sel >= static_cast<int>(drives_.size())) {
-        MessageBoxW(hwnd_, L"Please select a drive.", L"Error", MB_OK);
-        return;
-    }
-
-    found_files_.clear();
-    ListView_DeleteAllItems(h_list_files_);
-    enable_buttons(true);
-    is_scanning_ = true;
-
-    worker_thread_ = std::thread([this]() { do_scan_recover(); });
-}
-
-void MainWindow::on_recover() {
-    if (is_scanning_) return;
-    if (found_files_.empty()) {
-        MessageBoxW(hwnd_, L"No files to recover. Please scan first.", L"Error", MB_OK);
-        return;
-    }
-    if (output_dir_.empty()) {
-        on_browse_output();
-        if (output_dir_.empty()) return;
-    }
-    MessageBoxW(hwnd_, L"Recovery from cached files is not yet implemented. Use Scan & Recover instead.",
-                L"Info", MB_OK | MB_ICONINFORMATION);
 }
 
 void MainWindow::on_stop() {
-    stop_operation();
+    if (manager_) {
+        manager_->stop();
+    }
+    state_ = State::Idle;
+    SetWindowTextW(h_btn_start_, L"Start");
+    EnableWindow(h_btn_stop_, FALSE);
+    enable_config_controls(true);
     set_status(L"Stopped");
-    enable_buttons(false);
-    is_scanning_ = false;
 }
 
-void MainWindow::on_browse_output() {
-    wchar_t path[MAX_PATH] = {};
-    BROWSEINFOW bi = {};
-    bi.hwndOwner = hwnd_;
-    bi.lpszTitle = L"Select output directory";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (pidl) {
-        if (SHGetPathFromIDListW(pidl, path)) {
-            output_dir_ = path;
-            SetWindowTextW(h_ed_output_, output_dir_.c_str());
-        }
-        CoTaskMemFree(pidl);
-    }
-}
-
-void MainWindow::do_scan() {
+void MainWindow::on_save_dirs() {
+    // Compute excluded drive letters from selected source disk
+    std::vector<wchar_t> excluded_letters;
     int sel = static_cast<int>(SendMessageW(h_combo_drives_, CB_GETCURSEL, 0, 0));
-    if (sel < 0 || sel >= static_cast<int>(drives_.size())) return;
-
-    auto& drive = drives_[sel];
-    set_status(L"Opening drive...");
-
-    DiskHandle handle;
-    if (!handle.open(drive.device_path)) {
-        set_status(L"Failed to open drive");
-        enable_buttons(false);
-        is_scanning_ = false;
-        return;
+    if (sel >= 0 && sel < static_cast<int>(drives_.size())) {
+        excluded_letters = DiskInfoQuery::GetDriveLettersForPhysicalDrive(drives_[sel].device_path);
     }
 
-    uint32_t sector_size = drive.geometry.sector_size ? drive.geometry.sector_size : 512;
-    SectorReader reader(handle, sector_size);
-    SignatureScanner scanner;
-
-    SignatureScanner::ScanConfig config;
-    config.start_sector = 0;
-    config.end_sector = drive.geometry.total_sectors;
-    config.step_sectors = 1;
-    config.scan_images = true;
-    config.scan_videos = true;
-    config.should_stop = [this]() { return stop_flag_.load(); };
-
-    set_status(L"Scanning...");
-
-    auto on_file = [this](RecoverableFile&& file) {
-        found_files_.push_back(std::move(file));
-        const auto& f = found_files_.back();
-        add_file_to_list(f);
-    };
-
-    auto on_progress = [this](const ScanProgress& p) {
-        update_progress(p);
-    };
-
-    scanner.scan(reader, config, on_file, on_progress);
-
-    set_status(L"Scan complete - " + std::to_wstring(found_files_.size()) + L" files found");
-    enable_buttons(false);
-    is_scanning_ = false;
-}
-
-void MainWindow::do_scan_recover() {
-    int sel = static_cast<int>(SendMessageW(h_combo_drives_, CB_GETCURSEL, 0, 0));
-    if (sel < 0 || sel >= static_cast<int>(drives_.size())) return;
-
-    auto& drive = drives_[sel];
-    set_status(L"Starting scan & recover...");
-
-    ScanAndRecoverManager mgr;
-    ScanAndRecoverManager::Config config;
-    config.device_path = drive.device_path;
-    config.output_dirs.push_back(output_dir_);
-    config.scan_images = true;
-    config.scan_videos = true;
-    config.session_id = GenerateSessionId();
-
-    mgr.set_progress_callback([this](const ScanAndRecoverManager::Progress& p) {
-        wchar_t text[256];
-        _snwprintf_s(text, _TRUNCATE, L"Progress: %u%% | Files: %u | Recovered: %u | Failed: %u | Bad: %u",
-                     p.percent, p.files_found, p.files_recovered, p.files_failed, p.bad_sectors);
-        set_status(text);
-        PostMessageW(h_progress_, PBM_SETPOS, p.percent, 0);
-    });
-
-    if (!mgr.start(config)) {
-        set_status(L"Failed to start scan & recover");
-        enable_buttons(false);
-        is_scanning_ = false;
-        return;
-    }
-
-    set_status(L"Scan & Recover running...");
-
-    while (mgr.is_running()) {
-        if (stop_flag_.load()) {
-            mgr.stop();
-            break;
+    if (SaveDirsDialog::Show(hwnd_, excluded_letters, save_dirs_)) {
+        // Update summary label
+        if (save_dirs_.empty()) {
+            SetWindowTextW(h_st_save_info_, L"No save directory selected");
+        } else {
+            std::wstring info = std::to_wstring(save_dirs_.size()) + L" dir(s) selected";
+            for (const auto& sd : save_dirs_) {
+                info += L" | " + sd.path + L" (" + FormatFileSize(sd.free_bytes) + L")";
+            }
+            SetWindowTextW(h_st_save_info_, info.c_str());
         }
-        Sleep(200);
     }
-
-    auto p = mgr.progress();
-    wchar_t result[512];
-    _snwprintf_s(result, _TRUNCATE,
-        L"Scan & Recover complete!\n\nFiles found: %u\nRecovered: %u\nFailed: %u\nBytes: %s\nBad sectors: %u",
-        p.files_found, p.files_recovered, p.files_failed,
-        FormatFileSize(p.bytes_recovered).c_str(), p.bad_sectors);
-
-    set_status(L"Scan & Recover complete");
-    enable_buttons(false);
-    is_scanning_ = false;
-
-    MessageBoxW(hwnd_, result, L"Complete", MB_OK | MB_ICONINFORMATION);
 }
 
-void MainWindow::stop_operation() {
-    stop_flag_ = true;
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
-    }
-    stop_flag_ = false;
-}
-
-void MainWindow::update_progress(const ScanProgress& progress) {
-    if (!h_progress_ || !h_status_bar_) return;
-
-    uint64_t total = progress.total_sectors;
-    uint64_t scanned = progress.sectors_scanned;
-
-    if (total > 0) {
-        int pct = static_cast<int>((scanned * 100) / total);
-        PostMessageW(h_progress_, PBM_SETPOS, pct, 0);
-    }
+void MainWindow::update_progress(const ScanAndRecoverManager::Progress& progress) {
+    PostMessageW(h_progress_, PBM_SETPOS, progress.percent, 0);
 
     wchar_t text[256];
-    _snwprintf_s(text, _TRUNCATE, L"Scanned: %llu / %llu MB | Files: %u | Bad: %u",
-                 scanned / 2048, total / 2048, progress.files_found, progress.bad_sectors_hit);
+    _snwprintf_s(text, _TRUNCATE,
+        L"Progress: %u%% | Found: %u | Recovered: %u | Failed: %u | Size: %s | Bad: %u",
+        progress.percent, progress.files_found, progress.files_recovered,
+        progress.files_failed, FormatFileSize(progress.bytes_recovered).c_str(),
+        progress.bad_sectors);
     set_status(text);
 }
 
-void MainWindow::add_file_to_list(const RecoverableFile& file) {
+void MainWindow::add_file_to_list(const RecoverableFile& file, const std::wstring& save_path) {
     int idx = ListView_GetItemCount(h_list_files_);
 
     LVITEMW item = {};
@@ -433,17 +480,21 @@ void MainWindow::add_file_to_list(const RecoverableFile& file) {
     item.pszText = const_cast<LPWSTR>(file.file_name.c_str());
     ListView_InsertItem(h_list_files_, &item);
 
-    const wchar_t* type = file.file_type == FileType::Image ? L"Image" : L"Video";
+    const wchar_t* type = file.file_type == FileType::Image ? L"Image"
+                        : file.file_type == FileType::Video ? L"Video"
+                        : L"Other";
     ListView_SetItemText(h_list_files_, idx, 1, const_cast<LPWSTR>(type));
 
     std::wstring size_str = FormatFileSize(file.file_size);
     ListView_SetItemText(h_list_files_, idx, 2, const_cast<LPWSTR>(size_str.c_str()));
 
-    if (!file.fragments.empty()) {
-        wchar_t sector_str[32];
-        _snwprintf_s(sector_str, _TRUNCATE, L"%llu", file.fragments[0].start_sector);
-        ListView_SetItemText(h_list_files_, idx, 3, sector_str);
+    // Show the directory portion of the save path (not the filename)
+    std::wstring dir_path = save_path;
+    size_t last_slash = dir_path.find_last_of(L"\\/");
+    if (last_slash != std::wstring::npos) {
+        dir_path = dir_path.substr(0, last_slash);
     }
+    ListView_SetItemText(h_list_files_, idx, 3, const_cast<LPWSTR>(dir_path.c_str()));
 
     const wchar_t* status = file.is_corrupted ? L"Damaged" : L"OK";
     ListView_SetItemText(h_list_files_, idx, 4, const_cast<LPWSTR>(status));
@@ -455,12 +506,16 @@ void MainWindow::set_status(const std::wstring& text) {
     }
 }
 
-void MainWindow::enable_buttons(bool scanning) {
-    EnableWindow(h_btn_scan_, !scanning);
-    EnableWindow(h_btn_recover_, !scanning && !found_files_.empty());
-    EnableWindow(h_btn_scan_recover_, !scanning);
-    EnableWindow(h_btn_stop_, scanning);
-    EnableWindow(h_combo_drives_, !scanning);
+void MainWindow::enable_config_controls(bool enabled) {
+    EnableWindow(h_combo_drives_, enabled);
+    EnableWindow(h_cb_scan_mode_, enabled);
+    EnableWindow(h_chk_images_, enabled);
+    EnableWindow(h_chk_videos_, enabled);
+    EnableWindow(h_ed_start_sector_, enabled);
+    EnableWindow(h_ed_end_sector_, enabled);
+    EnableWindow(h_rb_sector_abs_, enabled);
+    EnableWindow(h_rb_sector_pct_, enabled);
+    EnableWindow(h_btn_save_dirs_, enabled);
 }
 
 } // namespace disk_recover

@@ -886,13 +886,13 @@ int main(int argc, char** argv) {
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
 
-        mgr.set_progress_callback([&](const ScanAndRecoverManager::Progress& p) {
-            std::cout << "\r进度: " << static_cast<int>(p.percent) << "% | "
-                      << "文件: " << p.files_found << " | "
-                      << "已恢复: " << p.files_recovered << " | "
-                      << "失败: " << p.files_failed << " | "
-                      << "坏道: " << p.bad_sectors << std::flush;
-        });
+        config.on_progress = [&](const ScanAndRecoverManager::Progress& p) {
+            std::cout << "\rProgress: " << static_cast<int>(p.percent) << "% | "
+                      << "Files: " << p.files_found << " | "
+                      << "Recovered: " << p.files_recovered << " | "
+                      << "Failed: " << p.files_failed << " | "
+                      << "Bad: " << p.bad_sectors << std::flush;
+        };
 
         std::cout << "开始扫描恢复: " << sr_device << " -> " << sr_output << "\n";
 

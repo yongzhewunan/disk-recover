@@ -14,4 +14,8 @@ public:
                      std::vector<SaveDirEntry>& out_dirs);
 };
 
+// Helper: get the physical drive number for a given drive letter
+// Returns -1 if unable to determine
+int GetPhysicalDriveNumberForLetter(wchar_t letter);
+
 } // namespace disk_recover
