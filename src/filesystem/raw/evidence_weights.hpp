@@ -22,10 +22,22 @@ struct EvidenceWeights {
 // Container: JFIF/Exif/Adobe markers
 // Footer: EOI marker (FFD9)
 constexpr EvidenceWeights JPEG_WEIGHTS = {
-    .header_weight = 25.0f,
+    .header_weight = 15.0f,
     .structure_weight = 35.0f,
-    .container_weight = 15.0f,
-    .footer_weight = 25.0f
+    .container_weight = 10.0f,
+    .footer_weight = 15.0f
+};
+
+// BMP evidence weights
+// Header: BM signature + file_size + pixel_offset
+// Structure: DIB header (header_size, planes, bpp, compression, dimensions)
+// Container: Palette / color table
+// Footer: File size cross-verification
+constexpr EvidenceWeights BMP_WEIGHTS = {
+    .header_weight = 20.0f,
+    .structure_weight = 40.0f,
+    .container_weight = 10.0f,
+    .footer_weight = 30.0f
 };
 
 // TIFF/RAW evidence weights
