@@ -11,6 +11,8 @@
 #endif
 
 #include "binary_reader.hpp"
+#include "format_registry.hpp"
+#include "validation.hpp"
 #include "../common/logger.hpp"
 #include <algorithm>
 #include <chrono>
@@ -287,31 +289,25 @@ static uint64_t search_image_footer(ReaderType& reader, uint64_t start_sector,
     return 0; // Footer not found
 }
 
-// ── Assess corruption level from match result and recovery status ──
+// ── Assess corruption level from validation result ──
+// Uses ValidateResult from the new three-phase model instead of confidence+flags.
 
-static CorruptionLevel assess_corruption(const MatchResult& mr, bool header_ok, bool footer_found) {
-    bool has_header = has_flag(mr.flags, MatchFlags::HasHeader);
-    bool has_footer = has_flag(mr.flags, MatchFlags::HasFooter) || footer_found;
-    bool partial    = has_flag(mr.flags, MatchFlags::PartialMatch);
-
+static CorruptionLevel assess_corruption(ValidateResult result, bool header_ok, bool footer_found) {
     if (!header_ok) return CorruptionLevel::Severe;
 
-    // Header + Footer + high confidence -> intact
-    if (has_header && has_footer && mr.confidence >= 60) return CorruptionLevel::None;
+    if (result >= ValidateResult::AcceptVerified && footer_found)
+        return CorruptionLevel::None;
 
-    // Header + Footer but lower confidence -> minor issue
-    if (has_header && has_footer && mr.confidence < 60) return CorruptionLevel::Minor;
+    if (result >= ValidateResult::AcceptContainer)
+        return CorruptionLevel::Minor;
 
-    // Header only with high confidence -> likely truncated (no footer found)
-    if (has_header && !has_footer && mr.confidence >= 60) return CorruptionLevel::Minor;
+    if (result >= ValidateResult::AcceptStructure)
+        return footer_found ? CorruptionLevel::Minor : CorruptionLevel::Moderate;
 
-    // Header only with moderate confidence -> likely damaged
-    if (has_header && !has_footer && mr.confidence >= 30) return CorruptionLevel::Moderate;
+    if (result == ValidateResult::AcceptHeader)
+        return CorruptionLevel::Moderate;
 
-    // Low confidence or partial match -> severely damaged
-    if (partial || mr.confidence < 30) return CorruptionLevel::Severe;
-
-    return CorruptionLevel::Moderate;
+    return CorruptionLevel::Severe;
 }
 
 // ── Format-aware gap threshold for video merging ──
@@ -425,17 +421,18 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
             if (cur_sector < claimed_end_sector) continue;
 
-            // ── PHASE 1 FIX: Use match_with_confidence() instead of legacy match() ──
-            auto match_result = FileSignatures::match_with_confidence(data, sector_size);
-            if (!match_result) continue;
+            // ── Use FormatRegistry for signature matching ──
+            auto match_result = FormatRegistry::instance().match(data, sector_size);
+            if (!match_result || match_result->result == ValidateResult::Reject) continue;
 
-            // ── Confidence-based early rejection ──
-            if (match_result->confidence < MIN_CONFIDENCE_THRESHOLD) continue;
+            const FormatDescriptor* desc = match_result->descriptor;
 
-            const FileSignature& sig = match_result->signature;
-
-            if (sig.file_type == FileType::Image && !config.scan_images) continue;
-            if (sig.file_type == FileType::Video && !config.scan_videos) continue;
+            // ── Type filtering based on ScanConfig ──
+            if (desc->file_type == FileType::Image && !config.scan_images) continue;
+            if (desc->file_type == FileType::Video && !config.scan_videos) continue;
+            if (desc->file_type == FileType::Audio && !config.scan_audio) continue;
+            if (desc->file_type == FileType::Document && !config.scan_documents) continue;
+            if (desc->file_type == FileType::Archive && !config.scan_archives) continue;
 
             sig_count++;
             RecoverableFile file{};
@@ -449,8 +446,9 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
                 claimed_end_sector = file_end;
 
                 if (sig_count <= 10) {
-                    LOG_FMT(L"[SigScanner] Found %s at sector %llu, size=%llu, confidence=%u",
-                             sig.description.c_str(), cur_sector, file.file_size, file.confidence);
+                    LOG_FMT(L"[SigScanner] Found %s at sector %llu, size=%llu, validation=%u",
+                             desc->description, cur_sector, file.file_size,
+                             static_cast<unsigned>(match_result->result));
                 }
                 if (file.file_type == FileType::Video) {
                     video_files.push_back(std::move(file));
@@ -492,88 +490,111 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
 template<typename ReaderType>
 bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_sector,
-                                         const MatchResult& match_result, RecoverableFile& file) {
-    const FileSignature& sig = match_result.signature;
+                                         const FormatRegistry::MatchResult& match_result, RecoverableFile& file) {
+    const FormatDescriptor* desc = match_result.descriptor;
     const uint32_t sector_size = reader.sector_size();
 
-    file.file_type = sig.file_type;
-    file.file_name = sig.description + L"_sector_" + std::to_wstring(start_sector)
-                     + L"." + sig.extension;
-    file.confidence = match_result.confidence;
-    file.match_flags_raw = static_cast<uint32_t>(match_result.flags);
+    file.file_type = desc->file_type;
+    file.file_name = std::wstring(desc->description) + L"_sector_" + std::to_wstring(start_sector)
+                     + L"." + desc->extension;
+    file.confidence = validate_result_to_confidence(match_result.result);
 
     const uint32_t HEADER_SECTORS = 4;
     AlignedBuffer headerBuf(HEADER_SECTORS * sector_size, sector_size);
     bool header_ok = reader.read_sectors_checked(start_sector, HEADER_SECTORS, headerBuf);
 
-    // ── Step 0: Use verified_file_size from validator if available ──
-    // This is the most accurate source - comes from format-specific parsing
-    uint64_t estimated_size = match_result.verified_file_size;
+    // ── Step 0: Use calculated_file_size from validator if available ──
+    // This is the most accurate source — comes from format-specific header parsing
+    uint64_t estimated_size = match_result.calculated_file_size;
 
-    // ── Step 1: Try embedded file size from header ──
-    if (estimated_size == 0 && header_ok) {
-        estimated_size = parse_file_size(sig.file_type, headerBuf.data(),
-                                          HEADER_SECTORS * sector_size);
+    // ── Step 1: Apply min_filesize from FormatDescriptor ──
+    if (desc->min_filesize > 0 && estimated_size > 0 && estimated_size < desc->min_filesize) {
+        estimated_size = desc->min_filesize;
     }
 
-    // ── Step 2: Footer-based boundary detection for images ──
-    bool footer_found = false;
-    if (sig.file_type == FileType::Image && header_ok) {
-        uint64_t heuristic_size = estimated_size;
-        if (heuristic_size == 0) {
-            // No embedded size — use a default search range
-            heuristic_size = 500 * 1024; // 500KB default
-        }
-        uint64_t footer_size = search_image_footer(
-            reader, start_sector, sig.file_type, sig.extension,
-            heuristic_size, sector_size, footer_found);
-        if (footer_size > 0) {
-            // Only override verified_file_size if footer search found something
-            // and we didn't have a verified size
-            if (estimated_size == 0) {
-                estimated_size = footer_size;
+    // ── Step 2: Progressive carving using data_check (if available) ──
+    bool footer_found = (match_result.result >= ValidateResult::AcceptVerified);
+
+    if (estimated_size == 0 && desc->data_check != nullptr) {
+        // Progressive carve: read blocks and call data_check until AcceptVerified or Reject
+        const uint32_t PROBE_CHUNK = 64;
+        const uint64_t MAX_CARVE_SECTORS = 102400;  // 50MB max
+
+        AlignedBuffer probeBuf(PROBE_CHUNK * sector_size, sector_size);
+        uint64_t running_size = 0;
+
+        for (uint64_t probe = start_sector;
+             probe < start_sector + MAX_CARVE_SECTORS;
+             probe += PROBE_CHUNK) {
+
+            uint32_t to_read = (std::min)(PROBE_CHUNK,
+                static_cast<uint32_t>(start_sector + MAX_CARVE_SECTORS - probe));
+            if (!reader.read_sectors_checked(probe, to_read, probeBuf)) break;
+
+            uint64_t calc_size = 0;
+            ValidateResult data_result = desc->data_check(
+                probeBuf.data(), to_read * sector_size,
+                (probe - start_sector) * sector_size, calc_size);
+
+            if (calc_size > 0) {
+                estimated_size = calc_size;
+                footer_found = true;
+                break;
             }
-            file.match_flags_raw |= static_cast<uint32_t>(MatchFlags::HasFooter);
+
+            if (data_result == ValidateResult::Reject) break;
+        }
+
+        // If data_check didn't find size, use default estimate
+        if (estimated_size == 0) {
+            estimated_size = desc->file_type == FileType::Image ? 500 * 1024 : 10 * 1024 * 1024;
         }
     }
 
-    // ── Step 3: Default estimates if still unknown ──
+    // ── Step 3: File check for container formats (if available) ──
+    if (estimated_size == 0 && desc->file_check != nullptr && header_ok) {
+        uint64_t calc_size = 0;
+        ValidateResult file_result = desc->file_check(
+            headerBuf.data(), HEADER_SECTORS * sector_size, calc_size);
+        if (calc_size > 0) {
+            estimated_size = calc_size;
+            footer_found = (file_result >= ValidateResult::AcceptVerified);
+        }
+    }
+
+    // ── Step 4: Default estimates if still unknown ──
     if (estimated_size == 0) {
-        if (sig.file_type == FileType::Video) {
-            estimated_size = 10 * 1024 * 1024;
-        } else if (sig.file_type == FileType::Image) {
-            estimated_size = 500 * 1024;
-        } else {
-            estimated_size = 1 * 1024 * 1024;
+        switch (desc->file_type) {
+        case FileType::Video:   estimated_size = 10 * 1024 * 1024; break;
+        case FileType::Image:   estimated_size = 500 * 1024; break;
+        case FileType::Audio:   estimated_size = 5 * 1024 * 1024; break;
+        case FileType::Document: estimated_size = 1 * 1024 * 1024; break;
+        case FileType::Archive: estimated_size = 5 * 1024 * 1024; break;
+        default:                 estimated_size = 1 * 1024 * 1024; break;
         }
     }
 
-    // ── Step 4: MP4/MOV atom tree walking ──
-    if (sig.file_type == FileType::Video &&
-        (sig.extension == L"mp4" || sig.extension == L"mov")) {
-        uint64_t atom_size = determine_mp4_size_impl(reader, start_sector, sector_size);
-        if (atom_size > 0) {
-            estimated_size = atom_size;
-        }
+    // ── Step 5: Apply max_filesize from FormatDescriptor ──
+    if (desc->max_filesize > 0 && estimated_size > desc->max_filesize) {
+        estimated_size = desc->max_filesize;
     }
 
-    // ── Size caps ──
-    if (sig.file_type == FileType::Image && estimated_size > 50 * 1024 * 1024) {
+    // ── Size caps by type ──
+    if (desc->file_type == FileType::Image && estimated_size > 50 * 1024 * 1024) {
         estimated_size = 50 * 1024 * 1024;
     }
-    if (sig.file_type == FileType::Video && estimated_size > 2ULL * 1024 * 1024 * 1024) {
+    if (desc->file_type == FileType::Video && estimated_size > 2ULL * 1024 * 1024 * 1024) {
         estimated_size = 2ULL * 1024 * 1024 * 1024;
     }
 
     uint64_t file_sectors = (estimated_size + sector_size - 1) / sector_size;
     if (file_sectors < 1) file_sectors = 1;
 
-    // ── Step 5: Video next-header boundary search (improved) ──
-    if (sig.file_type == FileType::Video) {
+    // ── Step 6: Next-header boundary search for video ──
+    if (desc->file_type == FileType::Video) {
         const uint32_t PROBE_CHUNK = 64;
         AlignedBuffer probeBuf(PROBE_CHUNK * sector_size, sector_size);
 
-        // Cap search to MAX_VIDEO_SEARCH_SECTORS (100MB) instead of 2GB
         uint64_t search_limit = start_sector + (std::min)(
             MAX_VIDEO_SEARCH_SECTORS,
             2ULL * 1024 * 1024 * 1024 / sector_size);
@@ -589,10 +610,10 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
 
             bool found_next = false;
             for (uint32_t off = 0; off < PROBE_CHUNK * sector_size; off += sector_size) {
-                // Use match_with_confidence() with confidence threshold
-                auto next_result = FileSignatures::match_with_confidence(
+                // Use FormatRegistry for next-header detection
+                auto next_result = FormatRegistry::instance().match(
                     probeBuf.data() + off, sector_size);
-                if (next_result && next_result->confidence >= MIN_CONFIDENCE_THRESHOLD) {
+                if (next_result && next_result->result != ValidateResult::Reject) {
                     uint64_t end_sector = probe + off / sector_size;
                     if (end_sector > start_sector) {
                         file_sectors = end_sector - start_sector;
@@ -608,8 +629,8 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     file.file_size = file_sectors * sector_size;
     file.fragments.push_back({start_sector, file_sectors});
 
-    // ── Step 6: Assess corruption level ──
-    file.corruption_level = assess_corruption(match_result, header_ok, footer_found);
+    // ── Step 7: Assess corruption level ──
+    file.corruption_level = assess_corruption(match_result.result, header_ok, footer_found);
 
     return true;
 }

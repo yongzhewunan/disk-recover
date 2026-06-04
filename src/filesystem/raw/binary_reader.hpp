@@ -18,6 +18,18 @@ inline uint32_t read_le32(const uint8_t* p) {
         (uint32_t(p[3]) << 24);
 }
 
+inline uint64_t read_le64(const uint8_t* p) {
+    return
+        uint64_t(p[0]) |
+        (uint64_t(p[1]) << 8) |
+        (uint64_t(p[2]) << 16) |
+        (uint64_t(p[3]) << 24) |
+        (uint64_t(p[4]) << 32) |
+        (uint64_t(p[5]) << 40) |
+        (uint64_t(p[6]) << 48) |
+        (uint64_t(p[7]) << 56);
+}
+
 inline uint16_t read_be16(const uint8_t* p) {
     return
         (uint16_t(p[0]) << 8) |

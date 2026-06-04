@@ -7,9 +7,12 @@
 namespace disk_recover {
 
 enum class FileType : uint8_t {
-    Unknown = 0,
-    Image   = 1,
-    Video   = 2,
+    Unknown  = 0,
+    Image    = 1,
+    Video    = 2,
+    Audio    = 3,
+    Document = 4,
+    Archive  = 5,
 };
 
 enum class ScanMode : uint8_t {

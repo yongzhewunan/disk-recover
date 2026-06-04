@@ -10,7 +10,7 @@ namespace disk_recover {
 // Used for MP4, MOV, HEIC, AVIF, 3GP, and other ISO BMFF-based formats
 struct BmffBrandEntry {
     std::string_view brand;          // 4-character brand code
-    FileType file_type;              // Image or Video
+    FileType file_type;              // Image, Video, or Audio
     std::wstring_view extension;     // File extension
     std::wstring_view description;   // Human-readable description
     uint8_t base_confidence;         // Base confidence when brand matches (0-100)
@@ -61,8 +61,8 @@ constexpr BmffBrandEntry BMFF_BRANDS[] = {
     {"M4VH", FileType::Video, L"m4v", L"M4V", 85},
     {"M4VP", FileType::Video, L"m4v", L"M4V", 85},
 
-    // M4A - iTunes Audio (treat as video container)
-    {"M4A ", FileType::Video, L"m4a", L"M4A", 80},
+    // M4A - iTunes Audio
+    {"M4A ", FileType::Audio, L"m4a", L"M4A", 80},
 
     // F4V - Flash Video (ISO BMFF variant)
     {"f4v ", FileType::Video, L"f4v", L"F4V", 85},
@@ -107,6 +107,12 @@ inline bool is_image_brand(std::string_view brand) {
 inline bool is_video_brand(std::string_view brand) {
     auto entry = lookup_brand(brand);
     return entry.has_value() && entry->file_type == FileType::Video;
+}
+
+// Check if brand indicates an audio format
+inline bool is_audio_brand(std::string_view brand) {
+    auto entry = lookup_brand(brand);
+    return entry.has_value() && entry->file_type == FileType::Audio;
 }
 
 } // namespace disk_recover

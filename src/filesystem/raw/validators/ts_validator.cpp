@@ -1,12 +1,26 @@
-#include "../validators.hpp"
-#include "../binary_reader.hpp"
-#include "../evidence_weights.hpp"
+#include "ts_validator.hpp"
+#include "binary_reader.hpp"
+#include "format_registry.hpp"
+#include "../file_signatures.hpp"  // For backward-compatible wrapper
+
+#include <algorithm>
 
 namespace disk_recover {
+namespace {
 
-std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
+// MPEG-TS sync byte
+static const uint8_t TS_MAGIC[] = {0x47};
+
+// ── Phase 1: Header check ──
+// Detects M2TS (192-byte packets with 4-byte timestamp prefix) vs MTS (188-byte packets).
+// Uses sliding sync search for 0x47 at 188-byte intervals.
+// Periodicity check across 5-10 packets.
+// Returns AcceptStructure if periodicity confirmed.
+ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     // Minimum length for validation (need multiple packets for confidence)
-    if (length < 188) return std::nullopt;
+    if (length < 188) return ValidateResult::Reject;
+
+    calculated_file_size = 0;  // No size in MPEG-TS structure
 
     // Phase 0: Detect M2TS vs MTS format
     // M2TS: 4-byte timestamp prefix before each 188-byte TS packet (192 bytes total)
@@ -48,7 +62,7 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
             int sync_count = 0;
 
             // Check for sync bytes at 188-byte intervals
-            for (int packet = 0; packet < 3 && offset + packet * 188 + 188 <= length; ++packet) {
+            for (int packet = 0; packet < 3 && offset + packet * 188 + 188 <= static_cast<int>(length); ++packet) {
                 if (data[offset + packet * 188] == 0x47) {
                     ++sync_count;
                 }
@@ -73,7 +87,7 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
 
     // Phase 2: Enhanced periodicity check (5-10 packets for high confidence)
     // This is critical for distinguishing TS from random data
-    constexpr int MIN_PACKETS_FOR_HIGH_CONFIDENCE = 5;
+    constexpr int MIN_PACKETS_FOR_STRUCTURE = 5;
     constexpr int MAX_PACKETS_TO_SCAN = 10;
 
     int sync_count_extended = 0;
@@ -89,26 +103,48 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
     if (sync_count_extended < 2) {
         // Single sync - weak signal, may be false positive
         if (length >= 188 && data[0] == 0x47 && sync_count_extended == 1) {
-            return MatchResult{
-                {FileType::Video, L"mts", L"MPEG-TS"},
-                25,  // Low confidence
-                MatchFlags::HasHeader | MatchFlags::PartialMatch
-            };
+            return ValidateResult::AcceptHeader;  // Minimal match
         }
-        return std::nullopt;
+        return ValidateResult::Reject;
     }
 
-    float evidence = TS_WEIGHTS.header_weight;
-    MatchFlags flags = MatchFlags::HasHeader;
+    // Periodicity confirmed with 5+ packets
+    if (sync_count_extended >= MIN_PACKETS_FOR_STRUCTURE) {
+        return ValidateResult::AcceptStructure;
+    }
 
-    // Phase 3: Continuity counter validation (stronger evidence)
+    // 2-4 packets: partial periodicity
+    return ValidateResult::AcceptHeader;
+}
+
+// ── Phase 2: Data check ──
+// Validates packet continuity counters as more data arrives.
+// Returns AcceptStructure if counters are consistent.
+ValidateResult check_ts_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
+    (void)offset_in_file;  // Not used for streaming format
+
+    calculated_file_size = 0;  // No size in MPEG-TS structure
+
+    // Determine packet size from data pattern
+    int packet_size = 188;
+    int sync_offset = 0;
+
+    // Check for M2TS pattern
+    if (length >= 384 && data[4] == 0x47 && data[196] == 0x47) {
+        packet_size = 192;
+        sync_offset = 4;
+    }
+
+    // Validate continuity counters across packets
     int valid_packets = 0;
     int last_pid = -1;
     int last_continuity = -1;
 
-    int packets_to_validate = (std::min)(sync_count_extended, MAX_PACKETS_TO_SCAN);
+    constexpr int MAX_PACKETS_TO_VALIDATE = 10;
+    int packets_to_validate = (std::min)(static_cast<int>(length / packet_size), MAX_PACKETS_TO_VALIDATE);
+
     for (int packet = 0; packet < packets_to_validate; ++packet) {
-        size_t pos = best_sync_offset + packet * packet_size;
+        size_t pos = sync_offset + packet * packet_size;
 
         // TS header structure:
         // Byte 0: sync (0x47)
@@ -118,16 +154,16 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
 
         if (pos + 4 > length) break;
 
+        // Verify sync byte
+        if (data[pos] != 0x47) continue;
+
         uint8_t byte1 = data[pos + 1];
         uint8_t byte2 = data[pos + 2];
         uint8_t byte3 = data[pos + 3];
 
         // Check transport error indicator
         bool has_error = (byte1 & 0x80) != 0;
-        if (has_error) {
-            // Packet has error - still counts but less evidence
-            continue;
-        }
+        if (has_error) continue;
 
         // Get PID (13-bit value)
         int pid = ((byte1 & 0x1F) << 8) | byte2;
@@ -145,15 +181,6 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
         if (adaptation >= 2 && pos + 5 <= length) {
             uint8_t adaptation_len = data[pos + 4];
             if (adaptation_len > 183) continue;  // Invalid length
-
-            // Check adaptation field flags
-            if (pos + 5 + adaptation_len <= length) {
-                uint8_t adapt_flags = data[pos + 5];
-                // Random access indicator is a good sign
-                if (adapt_flags & 0x40) {
-                    evidence += 5.0f;
-                }
-            }
         }
 
         // Validate continuity counter for same PID
@@ -161,8 +188,9 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
             // Continuity should increment (or stay same for adaptation-only)
             int expected = (last_continuity + 1) % 16;
             if (adaptation == 1 || adaptation == 3) {  // Payload present
-                if (continuity == expected) {
-                    evidence += 10.0f;  // Continuity matches
+                if (continuity != expected) {
+                    // Continuity mismatch — could be packet loss, not a rejection
+                    // Still count as valid packet but don't boost confidence
                 }
             }
             // Adaptation-only packets can repeat continuity
@@ -173,39 +201,84 @@ std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
         ++valid_packets;
     }
 
-    // Phase 4: Calculate confidence with enhanced periodicity evidence
-    // Sync count evidence - higher bar for high confidence
-    if (sync_count_extended >= MIN_PACKETS_FOR_HIGH_CONFIDENCE) {
-        evidence += 25.0f;
-        flags |= MatchFlags::DeepValidated;
-    } else if (sync_count_extended >= 3) {
-        evidence += 15.0f;
-    } else if (sync_count_extended >= 2) {
-        evidence += 8.0f;
+    // If we validated at least some packets with consistent structure
+    if (valid_packets >= 2) {
+        return ValidateResult::AcceptStructure;
     }
 
-    // Valid packet evidence
-    if (valid_packets == sync_count_extended) {
-        evidence += TS_WEIGHTS.container_weight;
-        flags = flags | MatchFlags::ContainerParsed;
-    } else if (valid_packets >= 2) {
-        evidence += TS_WEIGHTS.container_weight * 0.5f;
-    }
+    // Keep carving even with minimal validation
+    return ValidateResult::AcceptHeader;
+}
 
-    // Return appropriate extension based on format
-    if (is_m2ts) {
-        return MatchResult{
-            {FileType::Video, L"m2ts", L"Blu-ray M2TS"},
-            normalize_confidence(evidence, TS_WEIGHTS),
-            flags
-        };
-    } else {
-        return MatchResult{
-            {FileType::Video, L"mts", L"MPEG-TS/AVCHD"},
-            normalize_confidence(evidence, TS_WEIGHTS),
-            flags
-        };
+// Auto-registration with FormatRegistry
+// Note: MPEG-TS can be MTS or M2TS; we register as MTS (more common).
+static const FormatDescriptor TS_DESCRIPTOR = {
+    .file_type       = FileType::Video,
+    .extension       = L"mts",
+    .description     = L"MPEG-TS/AVCHD video",
+    .min_filesize    = 188,
+    .max_filesize    = 0,
+    .signature       = {TS_MAGIC, 1, 0},
+    .header_check    = check_ts_header_impl,
+    .data_check      = check_ts_data_impl,
+    .file_check      = nullptr,
+    .enabled_by_default = true,
+};
+
+static bool _ts_registered = []() {
+    FormatRegistry::instance().register_format(TS_DESCRIPTOR);
+    return true;
+}();
+
+} // anonymous namespace
+
+// Public interface
+ValidateResult check_ts_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
+    return check_ts_header_impl(data, length, calculated_file_size);
+}
+
+ValidateResult check_ts_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
+    return check_ts_data_impl(data, length, offset_in_file, calculated_file_size);
+}
+
+// ── Backward-compatible wrapper for old FileSignatures interface ──
+// Converts ValidateResult + FormatDescriptor to old MatchResult.
+namespace {
+
+// Helper to detect M2TS vs MTS from data for extension selection
+const wchar_t* ts_format_extension(const uint8_t* data, size_t length) {
+    if (length >= 384 && data[4] == 0x47 && data[196] == 0x47) {
+        return L"m2ts";
     }
+    return L"mts";
+}
+
+const wchar_t* ts_format_description(const uint8_t* data, size_t length) {
+    if (length >= 384 && data[4] == 0x47 && data[196] == 0x47) {
+        return L"Blu-ray M2TS";
+    }
+    return L"MPEG-TS/AVCHD";
+}
+
+} // anonymous namespace
+
+std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
+    uint64_t calculated_file_size = 0;
+    ValidateResult result = check_ts_header_impl(data, length, calculated_file_size);
+    if (result == ValidateResult::Reject) return std::nullopt;
+
+    const wchar_t* ext = ts_format_extension(data, length);
+    const wchar_t* desc = ts_format_description(data, length);
+
+    MatchFlags flags = MatchFlags::HasHeader;
+    if (result >= ValidateResult::AcceptStructure) flags = flags | MatchFlags::DeepValidated;
+
+    return MatchResult{
+        {FileType::Video, ext, desc},
+        validate_result_to_confidence(result),
+        flags,
+        0  // verified_file_size: no size in MPEG-TS structure
+    };
 }
 
 } // namespace disk_recover
