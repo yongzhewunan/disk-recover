@@ -668,7 +668,43 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     file.file_size = file_sectors * sector_size;
     file.fragments.push_back({start_sector, file_sectors});
 
-    // ── Step 7: Reject files below format minimum size threshold ──
+    // ── Step 7: Final file_check validation (if available) ──
+    // PhotoRec calls file_check after the file is fully assembled for final validation.
+    // This catches corrupted files that passed header_check/data_check but have
+    // structural issues visible only in the complete file data.
+    if (desc->file_check != nullptr && header_ok && file_sectors <= 8192) {
+        // Only perform file_check for files that fit in a reasonable buffer (4MB)
+        AlignedBuffer fileBuf(file_sectors * sector_size, sector_size);
+        if (reader.read_sectors_checked(start_sector, static_cast<uint32_t>(file_sectors), fileBuf)) {
+            uint64_t calc_size = estimated_size;
+            ValidateResult file_result = desc->file_check(
+                fileBuf.data(), file_sectors * sector_size, calc_size);
+
+            if (file_result == ValidateResult::Reject) {
+                return false;  // file_check rejects -> discard this candidate
+            }
+
+            // file_check may refine the file size (e.g., find exact IEND/EOI position)
+            if (calc_size > 0 && calc_size < estimated_size) {
+                estimated_size = calc_size;
+                file_sectors = (estimated_size + sector_size - 1) / sector_size;
+                file.file_size = file_sectors * sector_size;
+                file.fragments[0].sector_count = file_sectors;
+            }
+
+            // Upgrade validation result if file_check confirms deeper
+            if (file_result > match_result.result) {
+                file.confidence = validate_result_to_confidence(file_result);
+            }
+
+            // file_check finding a footer improves corruption assessment
+            if (file_result >= ValidateResult::AcceptVerified) {
+                footer_found = true;
+            }
+        }
+    }
+
+    // ── Step 8: Reject files below format minimum size threshold ──
     // This catches false positives that passed header check but are too small
     if (desc->min_filesize > 0 && file.file_size < desc->min_filesize) {
         return false;

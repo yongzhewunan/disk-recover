@@ -73,15 +73,17 @@ TEST(FormatRegistryTest, MatchPngHeader) {
 TEST(FormatRegistryTest, MatchBmpHeader) {
     // BMP with all fields valid per bmp_validator.cpp requirements:
     // - file_size >= 54, pixel_offset >= 54
-    // - dib_size in {12,40,52,56,64,108,124}
+    // - pixel_offset < file_size (must have pixel data)
+    // - dib_size in {12,40,52,56,64,108,124}, dib_size < file_size
     // - planes == 1, bpp in {1,4,8,16,24,32}
     // - compression in {0-5}
     // - width > 0, height != 0
-    uint8_t data[54] = {};
+    // - reserved fields at offset 6-9 must be zero
+    uint8_t data[58] = {};  // 14 (file header) + 40 (DIB) + 4 (1 pixel at 24bpp + 1 pad)
     data[0] = 0x42; data[1] = 0x4D;             // "BM"
-    // File size: 54 (LE32 at offset 2)
-    data[2] = 0x36; data[3] = 0x00; data[4] = 0x00; data[5] = 0x00;
-    // Reserved1+2 (offsets 6-13)
+    // File size: 58 (LE32 at offset 2)
+    data[2] = 0x3A; data[3] = 0x00; data[4] = 0x00; data[5] = 0x00;
+    // Reserved1+2 (offsets 6-9) — already zero (required by PhotoRec check)
     data[10] = 0x36; data[11] = 0x00; data[12] = 0x00; data[13] = 0x00; // Pixel offset: 54
     data[14] = 0x28; data[15] = 0x00; data[16] = 0x00; data[17] = 0x00; // DIB header size: 40
     data[18] = 0x01; data[19] = 0x00; data[20] = 0x00; data[21] = 0x00; // Width: 1
@@ -89,13 +91,14 @@ TEST(FormatRegistryTest, MatchBmpHeader) {
     data[26] = 0x01; data[27] = 0x00;  // Planes: 1
     data[28] = 0x18; data[29] = 0x00;  // BPP: 24
     // Compression: BI_RGB (0) at offset 30 — already zero
-    // Remaining fields (offsets 34-53) are zero — valid defaults
+    // Image size at offset 34: 4 (1 row × 4 bytes aligned)
+    data[34] = 0x04; data[35] = 0x00; data[36] = 0x00; data[37] = 0x00;
     auto result = FormatRegistry::instance().match(data, sizeof(data));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->result, ValidateResult::AcceptVerified);
     EXPECT_EQ(result->descriptor->file_type, FileType::Image);
     EXPECT_STREQ(result->descriptor->extension, L"bmp");
-    EXPECT_EQ(result->calculated_file_size, 54u);
+    EXPECT_EQ(result->calculated_file_size, 58u);
 }
 
 TEST(FormatRegistryTest, MatchPdfHeader) {

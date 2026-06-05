@@ -38,6 +38,7 @@ ValidateResult check_jpeg_header_impl(const uint8_t* data, size_t length, uint64
     // State tracking
     bool found_sof = false;
     bool found_sos = false;
+    bool found_mpo = false;
     bool found_eoi = false;
     size_t last_eoi_pos = 0;
 
@@ -134,8 +135,43 @@ ValidateResult check_jpeg_header_impl(const uint8_t* data, size_t length, uint64
             }
         }
 
+        // ── DHT marker (FF C4) — Huffman table definition ──
+        // PhotoRec validates DHT content: invalid tables are a strong
+        // indicator of corrupted data masquerading as JPEG.
+        if (marker == 0xC4) {
+            if (seg_len < 3) return ValidateResult::Reject;  // Too short for DHT
+
+            if (pos + seg_len <= length) {
+                uint8_t class_id = data[pos + 2];
+                uint8_t huffman_class = class_id >> 4;  // 0=DC, 1=AC
+                uint8_t huffman_id    = class_id & 0x0F; // Table ID 0-3
+
+                if (huffman_class > 1) return ValidateResult::Reject;  // Invalid class
+                if (huffman_id > 3)    return ValidateResult::Reject;  // Invalid ID
+
+                // Count total symbols: sum of 16 BIT-count bytes at offsets 3-18
+                // Total symbols + 19 (class_id + 16 counts) must fit in seg_len
+                uint32_t total_symbols = 0;
+                for (int j = 0; j < 16 && pos + 3 + j < length; j++) {
+                    total_symbols += data[pos + 3 + j];
+                }
+                if (total_symbols + 19 > seg_len) return ValidateResult::Reject;  // Symbol overflow
+            }
+        }
+
         // ── APP markers (FF E0-EF) ──
         if (marker >= 0xE0 && marker <= 0xEF) {
+            // Check for APP2/MPF (Multi-Picture Object)
+            // MPO files contain multiple JPEG images in a single file
+            if (marker == 0xE2 && seg_len >= 6 && pos + seg_len <= length) {
+                // MPF identifier: "MPF\0" at start of APP2 data
+                if (data[pos + 2] == 'M' && data[pos + 3] == 'P' &&
+                    data[pos + 4] == 'F' && data[pos + 5] == '\0') {
+                    // This is an MPO file — multiple SOI/EOI pairs expected
+                    // The data_check needs to find the LAST EOI, not the first
+                    found_mpo = true;
+                }
+            }
             // Validate APP0 (JFIF) or APP1 (Exif) — strong real-JPEG evidence
             // but not required for AcceptStructure
         }
@@ -196,6 +232,16 @@ ValidateResult check_jpeg_data_impl(const uint8_t* data, size_t length, uint64_t
 
         // FF D9 — EOI found!
         if (next == 0xD9) {
+            // Check if this is the final EOI or an embedded thumbnail's EOI.
+            // If the next bytes after EOI are another SOI (FF D8), this EOI
+            // belongs to an embedded thumbnail — skip and continue scanning.
+            // This aligns with the scanner's find_jpeg_eoi "last EOI" strategy.
+            if (i + 3 < length && data[i + 2] == 0xFF && data[i + 3] == 0xD8) {
+                // Embedded thumbnail EOI — skip past it, continue looking for final EOI
+                i += 2;
+                continue;
+            }
+            // Final EOI — file boundary found
             calculated_file_size = offset_in_file + i + 2;
             return ValidateResult::AcceptVerified;
         }
@@ -219,6 +265,126 @@ ValidateResult check_jpeg_data_impl(const uint8_t* data, size_t length, uint64_t
     return ValidateResult::AcceptHeader;
 }
 
+// ── Phase 3: File check (full file re-validation) ──
+// Re-validates the entire JPEG file from disk: verifies marker structure,
+// finds EOI, and checks minimal structural integrity.
+ValidateResult check_jpeg_file_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
+    if (length < 4) return ValidateResult::Reject;
+
+    // Re-verify SOI marker
+    if (data[0] != 0xFF || data[1] != 0xD8) return ValidateResult::Reject;
+
+    // Walk the marker stream
+    size_t i = 2;
+    bool has_sof = false;
+    bool has_sos = false;
+    bool in_entropy = false;
+    const size_t MAX_MARKER_ITERATIONS = 1000000;  // Safety limit
+
+    for (size_t iters = 0; iters < MAX_MARKER_ITERATIONS && i < length; ++iters) {
+        if (in_entropy) {
+            // Scanning compressed data for markers
+            if (data[i] != 0xFF) {
+                i++;
+                continue;
+            }
+            // Found FF — check next byte
+            if (i + 1 >= length) break;
+            uint8_t next = data[i + 1];
+
+            if (next == 0x00) { i += 2; continue; }  // Byte stuffing
+            if (next >= 0xD0 && next <= 0xD7) { i += 2; continue; }  // RST markers
+
+            // EOI marker
+            if (next == 0xD9) {
+                // Check for embedded thumbnail: FF D8 after EOI
+                if (i + 3 < length && data[i + 2] == 0xFF && data[i + 3] == 0xD8) {
+                    // Embedded thumbnail EOI — skip past it, continue
+                    i += 2;
+                    in_entropy = false;
+                    continue;
+                }
+                // Final EOI
+                calculated_file_size = i + 2;
+                // Must have at least SOF + SOS to be valid
+                if (!has_sof || !has_sos) return ValidateResult::Reject;
+                return ValidateResult::AcceptVerified;
+            }
+
+            // Another marker found (SOS, SOF, APP, etc.) — exit entropy mode
+            in_entropy = false;
+            // Fall through to marker processing below
+            i++;  // Position at the FF
+            continue;
+        }
+
+        // Not in entropy data — looking for markers
+        if (data[i] != 0xFF) return ValidateResult::Reject;  // Expected marker prefix
+
+        // Skip padding FF bytes
+        while (i < length && data[i] == 0xFF) i++;
+        if (i >= length) break;
+
+        uint8_t marker = data[i];
+        i++;
+
+        // SOF markers (0xC0-0xC3, 0xC5-0xC7, 0xC9-0xCB, 0xCD-0xCF)
+        if ((marker >= 0xC0 && marker <= 0xC3) ||
+            (marker >= 0xC5 && marker <= 0xC7) ||
+            (marker >= 0xC9 && marker <= 0xCB) ||
+            (marker >= 0xCD && marker <= 0xCF)) {
+            has_sof = true;
+            if (i + 2 > length) break;
+            uint16_t seg_len = read_be16(data + i);
+            i += seg_len;
+            continue;
+        }
+
+        // SOS marker (0xDA) — start of scan, followed by entropy data
+        if (marker == 0xDA) {
+            has_sos = true;
+            if (i + 2 > length) break;
+            uint16_t seg_len = read_be16(data + i);
+            i += seg_len;
+            in_entropy = true;
+            continue;
+        }
+
+        // EOI marker
+        if (marker == 0xD9) {
+            // Check for embedded thumbnail
+            if (i + 1 < length && data[i] == 0xFF && data[i + 1] == 0xD8) {
+                i += 2;
+                continue;
+            }
+            calculated_file_size = i;
+            if (!has_sof || !has_sos) return ValidateResult::Reject;
+            return ValidateResult::AcceptVerified;
+        }
+
+        // SOI marker (0xD8) — start of embedded thumbnail, skip
+        if (marker == 0xD8) continue;
+
+        // Marker with length field (APP, DQT, DHT, DRI, COM, etc.)
+        if ((marker >= 0xC0 && marker <= 0xFE) && marker != 0xFF && marker != 0xD8 && marker != 0xD9) {
+            if (i + 2 > length) break;
+            uint16_t seg_len = read_be16(data + i);
+            if (seg_len < 2) return ValidateResult::Reject;  // Invalid segment length
+            i += seg_len;
+            continue;
+        }
+
+        // Other markers (RST, TEM, etc.) — no length field
+        continue;
+    }
+
+    // No EOI found or file truncated
+    if (has_sof && has_sos)
+        return ValidateResult::AcceptStructure;  // Valid structure but truncated
+
+    return ValidateResult::Reject;
+}
+
 } // anonymous namespace
 
 const FormatDescriptor JPEG_DESCRIPTOR = {
@@ -230,7 +396,7 @@ const FormatDescriptor JPEG_DESCRIPTOR = {
     .signature       = {JPEG_MAGIC, 3, 0},
     .header_check    = check_jpeg_header_impl,
     .data_check      = check_jpeg_data_impl,  // Progressive EOI search
-    .file_check      = nullptr,
+    .file_check      = check_jpeg_file_impl,
     .enabled_by_default = true,
 };
 

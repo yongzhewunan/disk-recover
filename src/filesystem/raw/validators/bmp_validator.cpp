@@ -15,6 +15,10 @@ ValidateResult check_bmp_header_impl(const uint8_t* data, size_t length, uint64_
     if (length < 54) return ValidateResult::Reject;
     if (data[0] != 0x42 || data[1] != 0x4D) return ValidateResult::Reject;
 
+    // Reserved fields must be zero (PhotoRec uses this to filter false positives)
+    if (read_le16(data + 6) != 0 || read_le16(data + 8) != 0)
+        return ValidateResult::Reject;
+
     uint32_t file_size    = read_le32(data + 2);
     uint32_t pixel_offset = read_le32(data + 10);
     uint32_t dib_size     = read_le32(data + 14);
@@ -22,6 +26,10 @@ ValidateResult check_bmp_header_impl(const uint8_t* data, size_t length, uint64_
     // Hard rejects: fundamental fields must be valid
     if (file_size < 54)    return ValidateResult::Reject;
     if (pixel_offset < 54) return ValidateResult::Reject;
+
+    // Size consistency checks (PhotoRec validates: offset < size, hdr_size < size)
+    if (pixel_offset >= file_size) return ValidateResult::Reject;
+    if (dib_size >= file_size)    return ValidateResult::Reject;  // DIB header can't be larger than file
 
     // DIB header size must be a known value
     switch (dib_size) {
@@ -78,6 +86,18 @@ ValidateResult check_bmp_header_impl(const uint8_t* data, size_t length, uint64_
     return ValidateResult::AcceptVerified;
 }
 
+// ── BMP data check (progressive size verification) ──
+// Verifies that carving has reached the header-declared file size.
+ValidateResult check_bmp_data_impl(const uint8_t* /*data*/, size_t /*length*/,
+    uint64_t offset_in_file, uint64_t& calculated_file_size) {
+    // BMP is a size-in-header format: we already know the file size from header_check.
+    // This data_check verifies we've reached that size during progressive carving.
+    if (calculated_file_size > 0 && offset_in_file >= calculated_file_size) {
+        return ValidateResult::AcceptVerified;  // File complete
+    }
+    return ValidateResult::AcceptStructure;  // Keep carving
+}
+
 } // anonymous namespace
 
 const FormatDescriptor BMP_DESCRIPTOR = {
@@ -88,7 +108,7 @@ const FormatDescriptor BMP_DESCRIPTOR = {
     .max_filesize    = 0,  // No hard max (scanner uses per-type defaults)
     .signature       = {BMP_MAGIC, 2, 0},
     .header_check    = check_bmp_header_impl,
-    .data_check      = nullptr,  // Size-in-header: generic size check
+    .data_check      = check_bmp_data_impl,  // Progressive size verification
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
