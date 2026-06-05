@@ -125,7 +125,7 @@ ValidateResult check_tiff_raw_header_impl(const uint8_t* data, size_t length, ui
 
 // ── Phase 3: File check (IFD walking for size calculation) ──
 // Walks all IFDs to find the maximum strip/tile offset + size.
-// This provides calculated_file_size which was previously always 0 for TIFF.
+// Properly pairs StripOffsets with StripByteCounts for accurate extent calculation.
 ValidateResult check_tiff_raw_file_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     if (length < 8) return ValidateResult::Reject;
 
@@ -155,11 +155,115 @@ ValidateResult check_tiff_raw_file_impl(const uint8_t* data, size_t length, uint
     uint32_t current_ifd = ifd_offset;
     int ifd_count = 0;
 
-    // Tags that contain strip/tile offsets and byte counts
-    // StripOffsets (273), TileOffsets (324)
-    // StripByteCounts (279), TileByteCounts (325)
-    // SubIFD (330), ExifIFD (34665)
-    // GPS IFD (34853)
+    // Helper lambda to read offset array and corresponding byte count array
+    // Returns the maximum (offset + byte_count) found
+    auto process_strip_tiles = [&](uint16_t offset_tag, uint16_t count_tag,
+                                    const uint8_t* ifd_start, uint16_t num_entries,
+                                    bool is_le) -> uint64_t {
+        uint64_t local_max = 0;
+        uint32_t offset_array_offset = 0;
+        uint32_t count_array_offset = 0;
+        uint32_t num_strips = 0;
+        uint16_t offset_type = 4;  // Default LONG
+        uint16_t count_type = 4;   // Default LONG
+        bool offset_inline = false;
+        uint32_t offset_inline_val = 0;
+        bool count_inline = false;
+        uint32_t count_inline_val = 0;
+
+        // First pass: find both offset and count entries
+        for (uint16_t i = 0; i < num_entries; ++i) {
+            const uint8_t* entry = ifd_start + 2 + 12 * i;
+            if (ifd_start + 2 + 12 * (i + 1) > data + length) break;
+
+            uint16_t tag = rd16(entry, is_le);
+            uint16_t type = rd16(entry + 2, is_le);
+            uint32_t count = rd32(entry + 4, is_le);
+            uint32_t value = rd32(entry + 8, is_le);
+
+            if (tag == offset_tag) {
+                num_strips = count;
+                offset_type = type;
+                uint8_t entry_size = (type == 3) ? 2 : 4;
+
+                if (count * entry_size <= 4) {
+                    // Inline single value
+                    offset_inline = true;
+                    offset_inline_val = value;
+                    offset_array_offset = 0;  // Not used
+                } else {
+                    offset_inline = false;
+                    offset_array_offset = value;
+                }
+            }
+
+            if (tag == count_tag) {
+                count_type = type;
+                uint8_t entry_size = (type == 3) ? 2 : 4;
+
+                if (count * entry_size <= 4) {
+                    count_inline = true;
+                    count_inline_val = value;
+                    count_array_offset = 0;
+                } else {
+                    count_inline = false;
+                    count_array_offset = value;
+                }
+            }
+        }
+
+        if (num_strips == 0) return 0;
+
+        // Second pass: compute extent for each strip/tile
+        for (uint32_t i = 0; i < num_strips; ++i) {
+            uint64_t strip_offset = 0;
+            uint64_t strip_count = 0;
+
+            // Get strip offset
+            if (offset_inline) {
+                strip_offset = offset_inline_val;
+            } else {
+                uint8_t entry_size = (offset_type == 3) ? 2 : 4;
+                size_t read_pos = offset_array_offset + i * entry_size;
+                if (read_pos + entry_size > length) break;
+
+                if (entry_size == 2) {
+                    strip_offset = rd16(data + read_pos, is_le);
+                } else {
+                    strip_offset = rd32(data + read_pos, is_le);
+                }
+            }
+
+            // Get strip byte count
+            if (count_inline) {
+                strip_count = count_inline_val;
+            } else if (count_array_offset > 0) {
+                uint8_t entry_size = (count_type == 3) ? 2 : 4;
+                size_t read_pos = count_array_offset + i * entry_size;
+                if (read_pos + entry_size > length) {
+                    // Can't read byte count, estimate from offset
+                    strip_count = 0;  // Will use offset-only fallback
+                } else {
+                    if (entry_size == 2) {
+                        strip_count = rd16(data + read_pos, is_le);
+                    } else {
+                        strip_count = rd32(data + read_pos, is_le);
+                    }
+                }
+            }
+
+            // Compute extent: offset + byte count
+            uint64_t extent = strip_offset + strip_count;
+            if (extent > local_max) local_max = extent;
+
+            // Also track raw offset in case byte count is invalid
+            if (strip_offset > local_max && strip_count == 0) {
+                local_max = strip_offset;
+            }
+        }
+
+        return local_max;
+    };
 
     while (current_ifd > 0 && current_ifd < length && ifd_count < 10) {
         ifd_count++;
@@ -169,104 +273,57 @@ ValidateResult check_tiff_raw_file_impl(const uint8_t* data, size_t length, uint
         if (count == 0 || count >= 100) break;
         if (current_ifd + 2 + 12 * count > length) break;
 
+        // Process StripOffsets (273) + StripByteCounts (279)
+        uint64_t strip_extent = process_strip_tiles(273, 279, data + current_ifd, count, le);
+        if (strip_extent > max_extent) max_extent = strip_extent;
+
+        // Process TileOffsets (324) + TileByteCounts (325)
+        uint64_t tile_extent = process_strip_tiles(324, 325, data + current_ifd, count, le);
+        if (tile_extent > max_extent) max_extent = tile_extent;
+
+        // Scan for SubIFD (330) - follow to find more data references
         for (uint16_t i = 0; i < count; ++i) {
             const uint8_t* entry = data + current_ifd + 2 + 12 * i;
             uint16_t tag = rd16(entry, le);
-            uint16_t type = rd16(entry + 2, le);
-            uint32_t count_val = rd32(entry + 4, le);
             uint32_t value_offset = rd32(entry + 8, le);
 
-            // StripOffsets (273) or TileOffsets (324)
-            if (tag == 273 || tag == 324) {
-                // Number of strips/tiles
-                uint32_t num_entries = count_val;
-                if (num_entries == 0) continue;
+            if (tag == 330 && value_offset > 0 && value_offset < length) {
+                // Follow SubIFD pointer(s)
+                uint32_t sub_ifd = value_offset;
+                int sub_count = 0;
+                while (sub_ifd > 0 && sub_ifd < length && sub_count < 5) {
+                    sub_count++;
+                    if (sub_ifd + 2 > length) break;
+                    uint16_t sc = rd16(data + sub_ifd, le);
+                    if (sc == 0 || sc >= 100) break;
+                    if (sub_ifd + 2 + 12 * sc > length) break;
 
-                // Type 3 = SHORT (2 bytes), Type 4 = LONG (4 bytes)
-                uint8_t entry_size = (type == 3) ? 2 : 4;
+                    // Process strips/tiles in SubIFD
+                    uint64_t sub_strip_extent = process_strip_tiles(273, 279, data + sub_ifd, sc, le);
+                    if (sub_strip_extent > max_extent) max_extent = sub_strip_extent;
 
-                // If data fits in 4 bytes, it's stored inline in value_offset
-                if (num_entries * entry_size <= 4) {
-                    uint64_t off = (type == 3) ? rd16(data + current_ifd + 2 + 12 * i + 8, le) : value_offset;
-                    if (off > max_extent) max_extent = off;
-                } else {
-                    // Data is at the offset stored in value_offset
-                    if (value_offset < length) {
-                        for (uint32_t j = 0; j < num_entries; ++j) {
-                            uint64_t off;
-                            if (entry_size == 2) {
-                                if (value_offset + j * 2 + 2 > length) break;
-                                off = rd16(data + value_offset + j * 2, le);
-                            } else {
-                                if (value_offset + j * 4 + 4 > length) break;
-                                off = rd32(data + value_offset + j * 4, le);
-                            }
-                            if (off > max_extent) max_extent = off;
-                        }
+                    uint64_t sub_tile_extent = process_strip_tiles(324, 325, data + sub_ifd, sc, le);
+                    if (sub_tile_extent > max_extent) max_extent = sub_tile_extent;
+
+                    // Next IFD pointer
+                    if (sub_ifd + 2 + 12 * sc + 4 <= length) {
+                        sub_ifd = rd32(data + sub_ifd + 2 + 12 * sc, le);
+                    } else {
+                        break;
                     }
                 }
             }
 
-            // StripByteCounts (279) or TileByteCounts (325)
-            // We need these paired with offsets, but for a simple max-extent
-            // calculation, we just need the last offset + its byte count.
-            // We'll handle this by tracking the maximum (offset + byte count)
-            // from the offset entries paired with their corresponding count entries.
-            // For simplicity, we track the maximum offset found and add a reasonable
-            // estimate later. A more precise approach would pair them explicitly.
-
-            // SubIFD (330) - follow to find more data references
-            if (tag == 330 && value_offset > 0 && value_offset < length) {
-                // Follow SubIFD pointer(s)
-                if (count_val * 4 <= 4) {
-                    // Single SubIFD offset inline
-                    if (value_offset > 0 && value_offset < length) {
-                        uint32_t sub_ifd = value_offset;
-                        int sub_count = 0;
-                        while (sub_ifd > 0 && sub_ifd < length && sub_count < 5) {
-                            sub_count++;
-                            if (sub_ifd + 2 > length) break;
-                            uint16_t sc = rd16(data + sub_ifd, le);
-                            if (sc == 0 || sc >= 100) break;
-                            if (sub_ifd + 2 + 12 * sc > length) break;
-
-                            for (uint16_t k = 0; k < sc; ++k) {
-                                const uint8_t* se = data + sub_ifd + 2 + 12 * k;
-                                uint16_t st = rd16(se, le);
-                                uint16_t stype = rd16(se + 2, le);
-                                uint32_t scount = rd32(se + 4, le);
-                                uint32_t svalue = rd32(se + 8, le);
-
-                                if (st == 273 || st == 324) {
-                                    uint32_t num = scount;
-                                    if (num == 0) continue;
-                                    uint8_t esz = (stype == 3) ? 2 : 4;
-                                    if (num * esz <= 4) {
-                                        uint64_t off = (stype == 3) ? rd16(se + 8, le) : svalue;
-                                        if (off > max_extent) max_extent = off;
-                                    } else if (svalue < length) {
-                                        for (uint32_t j = 0; j < num; ++j) {
-                                            uint64_t off;
-                                            if (esz == 2) {
-                                                if (svalue + j * 2 + 2 > length) break;
-                                                off = rd16(data + svalue + j * 2, le);
-                                            } else {
-                                                if (svalue + j * 4 + 4 > length) break;
-                                                off = rd32(data + svalue + j * 4, le);
-                                            }
-                                            if (off > max_extent) max_extent = off;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Next IFD pointer
-                            if (sub_ifd + 2 + 12 * sc + 4 <= length) {
-                                sub_ifd = rd32(data + sub_ifd + 2 + 12 * sc, le);
-                            } else {
-                                break;
-                            }
-                        }
+            // ExifIFD (34665) - may contain thumbnail data
+            if (tag == 34665 && value_offset > 0 && value_offset < length) {
+                // ExifIFD may have JPEG thumbnail in StripOffsets
+                // We'll scan it for any strip data
+                uint32_t exif_ifd = value_offset;
+                if (exif_ifd + 2 <= length) {
+                    uint16_t exif_count = rd16(data + exif_ifd, le);
+                    if (exif_count > 0 && exif_count < 100 && exif_ifd + 2 + 12 * exif_count <= length) {
+                        uint64_t exif_strip_extent = process_strip_tiles(273, 279, data + exif_ifd, exif_count, le);
+                        if (exif_strip_extent > max_extent) max_extent = exif_strip_extent;
                     }
                 }
             }
@@ -281,15 +338,8 @@ ValidateResult check_tiff_raw_file_impl(const uint8_t* data, size_t length, uint
         }
     }
 
-    // If we found data extents, estimate file size
+    // If we found data extents, set calculated file size
     if (max_extent > 0) {
-        // Add a reasonable buffer for the last strip/tile data.
-        // Without exact byte counts paired, we can't know the exact size,
-        // but max_extent gives us the start of the last data block.
-        // For a conservative estimate, we use max_extent as a lower bound
-        // and don't set calculated_file_size (leaving it at 0 = unknown).
-        // However, if we found a single strip at a known offset, that IS
-        // useful as a minimum size estimate.
         calculated_file_size = max_extent;
     }
 
