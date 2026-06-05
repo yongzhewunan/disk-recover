@@ -60,6 +60,78 @@ TEST(FormatRegistryTest, MatchJpegHeader) {
     EXPECT_STREQ(result->descriptor->extension, L"jpg");
 }
 
+// Test: JPEG with APP1 Exif header should match
+TEST(FormatRegistryTest, MatchJpegExifHeader) {
+    uint8_t data[] = {
+        0xFF, 0xD8,   // SOI
+        0xFF, 0xE1,   // APP1 marker
+        0x00, 0x10,   // Length: 16 (minimum for Exif header)
+        0x45, 0x78, 0x69, 0x66, 0x00, 0x00,  // "Exif\0\0"
+        0x49, 0x49,   // TIFF header: little-endian "II"
+        0x2A, 0x00,   // TIFF magic: 42
+        0x08, 0x00, 0x00, 0x00,  // Offset to first IFD
+        0xFF, 0xC0,   // SOF0 marker
+        0x00, 0x0B,   // Length: 11
+        0x08,         // Precision: 8 bits
+        0x00, 0x01,   // Height: 1
+        0x00, 0x01,   // Width: 1
+        0x01,         // Components: 1
+        0x01, 0x11, 0x00,
+        0xFF, 0xDA,   // SOS marker
+        0x00, 0x08,   // Length: 8
+        0x01, 0x01, 0x00,
+        0x00, 0x3F, 0x00,
+        0xFF, 0xD9    // EOI
+    };
+    auto result = FormatRegistry::instance().match(data, sizeof(data));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_NE(result->result, ValidateResult::Reject);
+    EXPECT_EQ(result->descriptor->file_type, FileType::Image);
+    EXPECT_STREQ(result->descriptor->extension, L"jpg");
+}
+
+// Test: JPEG with invalid fourth byte should be rejected
+TEST(FormatRegistryTest, RejectJpegInvalidFourthByte) {
+    // FF D8 FF followed by invalid marker (0x00)
+    uint8_t data[] = {
+        0xFF, 0xD8,   // SOI
+        0xFF, 0x00,   // Invalid: FF 00 is byte stuffing, not a marker
+        0x00, 0x10,   // Random data
+        0x4A, 0x46, 0x49, 0x46, 0x00,
+        0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00
+    };
+    auto result = FormatRegistry::instance().match(data, sizeof(data));
+    EXPECT_FALSE(result.has_value());
+}
+
+// Test: JPEG APP0 without JFIF identifier should be rejected
+TEST(FormatRegistryTest, RejectJpegApp0NoJfif) {
+    uint8_t data[] = {
+        0xFF, 0xD8,   // SOI
+        0xFF, 0xE0,   // APP0 marker
+        0x00, 0x10,   // Length: 16
+        'X', 'Y', 'Z', 'W', 0x00,  // Invalid: not "JFIF"
+        0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+        0xFF, 0xD9    // EOI
+    };
+    auto result = FormatRegistry::instance().match(data, sizeof(data));
+    EXPECT_FALSE(result.has_value());
+}
+
+// Test: JPEG APP1 without Exif identifier should be rejected
+TEST(FormatRegistryTest, RejectJpegApp1NoExif) {
+    uint8_t data[] = {
+        0xFF, 0xD8,   // SOI
+        0xFF, 0xE1,   // APP1 marker
+        0x00, 0x10,   // Length: 16
+        'X', 'Y', 'Z', 'W', 0x00, 0x00,  // Invalid: not "Exif"
+        0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+        0xFF, 0xD9    // EOI
+    };
+    auto result = FormatRegistry::instance().match(data, sizeof(data));
+    EXPECT_FALSE(result.has_value());
+}
+
 TEST(FormatRegistryTest, MatchPngHeader) {
     // PNG signature only (8 bytes) — should return AcceptHeader
     uint8_t data[] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};

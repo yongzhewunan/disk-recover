@@ -9,12 +9,18 @@ namespace {
 // JPEG magic: FF D8 FF (SOI + marker prefix)
 static const uint8_t JPEG_MAGIC[] = {0xFF, 0xD8, 0xFF};
 
+// Helper: Check if byte is printable ASCII (used for COM marker validation)
+static inline bool is_printable_jpeg(uint8_t c) {
+    return (c >= 0x20 && c <= 0x7E);  // Printable ASCII range
+}
+
 // ============================================================================
 // JPEG Marker State Machine Validator (Three-Phase Model)
 //
 // Phase 1 (header_check): Parse marker stream from SOI through SOS.
 //   - Validates SOF dimensions, precision, components
 //   - Checks for JFIF/Exif markers (bonus evidence for real-JPEG)
+//   - Strictly validates the fourth byte (following FF D8 FF)
 //   - Returns AcceptHeader (SOI only), AcceptStructure (SOF found),
 //     or AcceptVerified (SOF+SOS+EOI all found)
 //   - Hard rejects if no SOF or SOS (not a decodable JPEG)
@@ -30,10 +36,83 @@ static const uint8_t JPEG_MAGIC[] = {0xFF, 0xD8, 0xFF};
 
 // ── Phase 1: Header check ──
 ValidateResult check_jpeg_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
-    if (length < 4) return ValidateResult::Reject;
+    if (length < 10) return ValidateResult::Reject;  // Need enough bytes for validation
     if (data[0] != 0xFF || data[1] != 0xD8 || data[2] != 0xFF) return ValidateResult::Reject;
 
     calculated_file_size = 0;  // Size unknown until EOI found
+
+    // =========================================================================
+    // Strict fourth-byte validation (inspired by PhotoRec file_jpg.c:1021-1047)
+    // After FF D8 FF, the fourth byte must be a valid marker identifier.
+    // This is critical for avoiding false positives from random data.
+    // =========================================================================
+    uint8_t fourth_byte = data[3];
+
+    switch (fourth_byte) {
+        case 0xE0:  // APP0 - JFIF/JFXX
+            // PhotoRec: buffer[6]!='J' || buffer[7]!='F' → reject
+            if (length < 8 || data[6] != 'J' || data[7] != 'F') {
+                return ValidateResult::Reject;
+            }
+            break;
+
+        case 0xE1:  // APP1 - Exif
+            // PhotoRec: buffer[6-9] must be "Exif"
+            if (length < 10 || data[6] != 'E' || data[7] != 'x' ||
+                data[8] != 'i' || data[9] != 'f') {
+                return ValidateResult::Reject;
+            }
+            break;
+
+        case 0xE2:  // APP2 - may contain MPF (Multi-Picture Format)
+            // Allow through, will be validated later by marker parsing
+            break;
+
+        case 0xFE:  // COM - Comment
+            // PhotoRec: comment bytes should be printable
+            if (length < 8 || (!is_printable_jpeg(data[6]) && !is_printable_jpeg(data[7]))) {
+                return ValidateResult::Reject;
+            }
+            break;
+
+        case 0xDB:  // DQT - Define Quantization Table
+            // Valid marker, continue to marker parsing
+            break;
+
+        case 0xC0: case 0xC1: case 0xC2: case 0xC3:  // SOF0-SOF3
+        case 0xC5: case 0xC6: case 0xC7:             // SOF5-SOF7
+        case 0xC9: case 0xCA: case 0xCB:             // SOF9-SOF11
+        case 0xCD: case 0xCE: case 0xCF:             // SOF13-SOF15
+            // Direct SOF without APP markers - rare but valid
+            break;
+
+        case 0xC4:  // DHT - Define Huffman Table
+            // Valid marker, will be validated in marker parsing loop
+            break;
+
+        case 0xDD:  // DRI - Define Restart Interval
+            // Valid marker
+            break;
+
+        case 0xDA:  // SOS - Start of Scan (very rare as 4th byte)
+            // Extremely unusual but technically possible
+            break;
+
+        case 0xD8:  // Another SOI - embedded thumbnail at start?
+            // Unusual but possible
+            break;
+
+        default:
+            // Other markers (0xE3-0xEF APP3-APP15, 0xF0-0xFD reserved)
+            // are less common and may indicate false positive
+            // PhotoRec rejects most cases via header_ignored()
+            if (fourth_byte >= 0xE3 && fourth_byte <= 0xEF) {
+                // APP3-APP15 - some cameras use these, allow with caution
+                break;
+            }
+            // Reject everything else as likely false positive
+            return ValidateResult::Reject;
+    }
 
     // State tracking
     bool found_sof = false;
