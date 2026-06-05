@@ -353,8 +353,16 @@ ValidateResult TestDiskValidator::data_check(const uint8_t* data, size_t length,
         return ValidateResult::AcceptHeader;
     }
 
-    // Update file_size to current offset + block size
-    recovery_ctx_->file_size = offset_in_file + length;
+    // Set up file_size for the sliding window model.
+    // TestDisk's data_check expects:
+    // - buffer[buffer_size/2] corresponds to file_size position
+    // - buffer[0] corresponds to (file_size - buffer_size/2)
+    // - buffer[buffer_size] corresponds to (file_size + buffer_size/2)
+    //
+    // We pass buffer containing [offset_in_file, offset_in_file + length].
+    // To match TestDisk's expectation, set file_size = offset_in_file + length/2
+    // so that buffer[length/2] corresponds to file_size.
+    recovery_ctx_->file_size = offset_in_file + length / 2;
 
     // Call TestDisk's data_check function
     data_check_t result = recovery_ctx_->data_check(
