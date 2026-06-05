@@ -587,15 +587,31 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
 
     if (estimated_size == 0 && desc->data_check != nullptr) {
         // Progressive carve: read blocks and call data_check until AcceptVerified or Reject
+        //
+        // TestDisk's data_check uses a sliding window model:
+        // - file_size is the window center
+        // - buffer_size/2 is the window radius
+        // - calculated_file_size must be within [file_size - buf/2, file_size + buf/2]
+        //
+        // To keep calculated_file_size inside the window, we use overlapping reads:
+        // - Read PROBE_CHUNK sectors each time
+        // - Advance only PROBE_ADVANCE sectors (half the chunk)
+        // - This keeps the parsing position within the window across consecutive calls
+        //
+        // Example: chunk=64 sectors (32KB), advance=32 sectors (16KB)
+        // Call 1: offset=0, file_size=16384, window=[0,32768], calculated=8 (inside)
+        // Call 2: offset=16384, file_size=24576, window=[8192,40960], calculated=33 (inside)
+        // Call 3: offset=32768, file_size=40960, window=[24576,57344], calculated continues...
         const uint32_t PROBE_CHUNK = 64;
+        const uint32_t PROBE_ADVANCE = PROBE_CHUNK / 2;  // Overlapping advance
         const uint64_t MAX_CARVE_SECTORS = 102400;  // 50MB max
 
         AlignedBuffer probeBuf(PROBE_CHUNK * sector_size, sector_size);
-        uint64_t running_size = 0;
+        uint64_t probe_offset_bytes = 0;  // Track cumulative byte offset for overlapping reads
 
         for (uint64_t probe = start_sector;
              probe < start_sector + MAX_CARVE_SECTORS;
-             probe += PROBE_CHUNK) {
+             probe += PROBE_ADVANCE) {
 
             uint32_t to_read = (std::min)(PROBE_CHUNK,
                 static_cast<uint32_t>(start_sector + MAX_CARVE_SECTORS - probe));
@@ -605,8 +621,11 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             g_td_dispatch_ext = desc->extension;
             ValidateResult data_result = desc->data_check(
                 probeBuf.data(), to_read * sector_size,
-                (probe - start_sector) * sector_size, calc_size);
+                probe_offset_bytes, calc_size);
             g_td_dispatch_ext = nullptr;
+
+            // Advance offset by PROBE_ADVANCE (half chunk) for next call
+            probe_offset_bytes += PROBE_ADVANCE * sector_size;
 
             // Update best_result even if calc_size is 0
             // data_check may return AcceptStructure/AcceptContainer without finding size
