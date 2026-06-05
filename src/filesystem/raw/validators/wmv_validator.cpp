@@ -46,8 +46,9 @@ ValidateResult check_wmv_header_impl(const uint8_t* data, size_t length, uint64_
     return ValidateResult::AcceptStructure;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor WMV_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor WMV_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"wmv",
     .description     = L"Windows Media Video / ASF container",
@@ -59,13 +60,6 @@ static const FormatDescriptor WMV_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _wmv_registered = []() {
-    FormatRegistry::instance().register_format(WMV_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_wmv_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

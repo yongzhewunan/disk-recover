@@ -102,14 +102,9 @@ ValidateResult check_riff_generic_header_impl(const uint8_t* data, size_t length
     return ValidateResult::AcceptHeader;
 }
 
-// ============================================================================
-// Auto-registration with FormatRegistry
-// Four descriptors for the four RIFF container types.
-// All share the same RIFF signature at offset 0.
-// The registry tries all matching descriptors and picks the deepest result.
-// ============================================================================
+} // anonymous namespace
 
-static const FormatDescriptor WEBP_DESCRIPTOR = {
+const FormatDescriptor WEBP_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"webp",
     .description     = L"WebP",
@@ -122,12 +117,7 @@ static const FormatDescriptor WEBP_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _webp_registered = []() {
-    FormatRegistry::instance().register_format(WEBP_DESCRIPTOR);
-    return true;
-}();
-
-static const FormatDescriptor AVI_DESCRIPTOR = {
+const FormatDescriptor AVI_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"avi",
     .description     = L"AVI",
@@ -140,12 +130,7 @@ static const FormatDescriptor AVI_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _avi_registered = []() {
-    FormatRegistry::instance().register_format(AVI_DESCRIPTOR);
-    return true;
-}();
-
-static const FormatDescriptor WAV_DESCRIPTOR = {
+const FormatDescriptor WAV_DESCRIPTOR = {
     .file_type       = FileType::Audio,
     .extension       = L"wav",
     .description     = L"WAV",
@@ -158,12 +143,7 @@ static const FormatDescriptor WAV_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _wav_registered = []() {
-    FormatRegistry::instance().register_format(WAV_DESCRIPTOR);
-    return true;
-}();
-
-static const FormatDescriptor RIFF_GENERIC_DESCRIPTOR = {
+const FormatDescriptor RIFF_GENERIC_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"riff",
     .description     = L"RIFF",
@@ -175,13 +155,6 @@ static const FormatDescriptor RIFF_GENERIC_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _riff_generic_registered = []() {
-    FormatRegistry::instance().register_format(RIFF_GENERIC_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_riff_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

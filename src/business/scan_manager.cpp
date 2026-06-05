@@ -187,7 +187,6 @@ void ScanManager::scan_thread_func(Config config) {
         progress_.sectors_scanned = saved_progress.sectors_scanned;
         progress_.files_found = saved_progress.files_found;
         progress_.bad_sectors_hit = saved_progress.bad_sectors_hit;
-        LOG_FMT(L"[ScanManager] Resuming: skipping metadata phase, scan_phase=%u", saved_progress.scan_phase);
     }
 
     {
@@ -245,16 +244,14 @@ void ScanManager::scan_thread_func(Config config) {
         if (on_progress_) on_progress_(progress_);
     };
 
-    LOG_FMT(L"[ScanManager] Starting scan mode=%d, images=%d, videos=%d",
-             static_cast<int>(config.mode), config.scan_images, config.scan_videos);
+    LOG_FMT(L"[ScanManager] Starting scan mode=%d", static_cast<int>(config.mode));
 
     if (!stop_requested_.load()) {
         switch (config.mode) {
         case ScanMode::Quick:
-            LOG_MSG(L"[ScanManager] Quick scan mode");
             {
                 FileSystemType fs_type = detect_filesystem(reader, start_sector);
-                LOG_FMT(L"[ScanManager] Detected file system type: %d", static_cast<int>(fs_type));
+                LOG_FMT(L"[ScanManager] Detected filesystem: %d", static_cast<int>(fs_type));
 
                 switch (fs_type) {
                 case FileSystemType::NTFS:
@@ -305,6 +302,9 @@ void ScanManager::scan_thread_func(Config config) {
                         scan_config.end_sector = end_sector;
                         scan_config.scan_images = config.scan_images;
                         scan_config.scan_videos = config.scan_videos;
+                        scan_config.scan_audio = config.scan_audio;
+                        scan_config.scan_documents = config.scan_documents;
+                        scan_config.scan_archives = config.scan_archives;
                         scan_config.should_stop = [this]() { return stop_requested_.load(); };
                         scanner.scan(reader, scan_config, on_file, on_scan_progress);
                     }
@@ -319,6 +319,9 @@ void ScanManager::scan_thread_func(Config config) {
                         scan_config.end_sector = end_sector;
                         scan_config.scan_images = config.scan_images;
                         scan_config.scan_videos = config.scan_videos;
+                        scan_config.scan_audio = config.scan_audio;
+                        scan_config.scan_documents = config.scan_documents;
+                        scan_config.scan_archives = config.scan_archives;
                         scan_config.should_stop = [this]() { return stop_requested_.load(); };
                         scanner.scan(reader, scan_config, on_file, on_scan_progress);
                     }
@@ -328,10 +331,9 @@ void ScanManager::scan_thread_func(Config config) {
             break;
 
         case ScanMode::Deep:
-            LOG_MSG(L"[ScanManager] Deep scan mode");
             {
                 FileSystemType fs_type = detect_filesystem(reader, start_sector);
-                LOG_FMT(L"[ScanManager] Detected file system type: %d", static_cast<int>(fs_type));
+                LOG_FMT(L"[ScanManager] Detected filesystem: %d", static_cast<int>(fs_type));
                 uint64_t metadata_end_sector = 0;
 
                 // Phase 1: metadata scan (skip if already done from resume)
@@ -403,12 +405,14 @@ void ScanManager::scan_thread_func(Config config) {
                     scan_config.end_sector = end_sector;
                     scan_config.scan_images = config.scan_images;
                     scan_config.scan_videos = config.scan_videos;
+                    scan_config.scan_audio = config.scan_audio;
+                    scan_config.scan_documents = config.scan_documents;
+                    scan_config.scan_archives = config.scan_archives;
                     scan_config.should_stop = [this]() { return stop_requested_.load(); };
 
                     // Set resume point if resuming from phase 2
                     if (has_saved && saved_progress.scan_phase >= 2 && saved_progress.raw_resume_sector > metadata_end_sector) {
                         scan_config.resume_from_sector = saved_progress.raw_resume_sector;
-                        LOG_FMT(L"[ScanManager] Resuming RAW scan from sector %llu", saved_progress.raw_resume_sector);
                     }
 
                     scanner.scan(reader, scan_config, on_file, on_scan_progress);
@@ -417,7 +421,6 @@ void ScanManager::scan_thread_func(Config config) {
             break;
 
         case ScanMode::Full:
-            LOG_MSG(L"[ScanManager] Full scan mode - entire disk RAW scan");
             {
                 SignatureScanner scanner;
                 SignatureScanner::ScanConfig scan_config{};
@@ -425,12 +428,14 @@ void ScanManager::scan_thread_func(Config config) {
                 scan_config.end_sector = end_sector;
                 scan_config.scan_images = config.scan_images;
                 scan_config.scan_videos = config.scan_videos;
+                scan_config.scan_audio = config.scan_audio;
+                scan_config.scan_documents = config.scan_documents;
+                scan_config.scan_archives = config.scan_archives;
                 scan_config.should_stop = [this]() { return stop_requested_.load(); };
 
                 // Set resume point if resuming
                 if (has_saved && saved_progress.raw_resume_sector > start_sector) {
                     scan_config.resume_from_sector = saved_progress.raw_resume_sector;
-                    LOG_FMT(L"[ScanManager] Resuming full scan from sector %llu", saved_progress.raw_resume_sector);
                 }
 
                 scanner.scan(reader, scan_config, on_file, on_scan_progress);
@@ -451,9 +456,8 @@ void ScanManager::scan_thread_func(Config config) {
     cache_db_.close();
     scanning_ = false;
 
-    LOG_FMT(L"[ScanManager] Scan done: files_found=%llu, sectors=%llu, bad=%llu, stopped=%d",
-             progress_.files_found, progress_.sectors_scanned, progress_.bad_sectors_hit,
-             stop_requested_.load());
+    LOG_FMT(L"[ScanManager] Scan done: files_found=%llu, sectors=%llu, bad=%llu",
+             progress_.files_found, progress_.sectors_scanned, progress_.bad_sectors_hit);
 
     // Final notification to UI (thread-safe via PostMessage)
     if (on_progress_) on_progress_(progress_);

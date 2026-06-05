@@ -124,8 +124,9 @@ ValidateResult check_gif_data_impl(const uint8_t* data, size_t length, uint64_t 
     return ValidateResult::AcceptStructure;  // Keep carving
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor GIF_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor GIF_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"gif",
     .description     = L"GIF image",
@@ -137,13 +138,6 @@ static const FormatDescriptor GIF_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _gif_registered = []() {
-    FormatRegistry::instance().register_format(GIF_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_gif_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

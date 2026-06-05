@@ -532,6 +532,9 @@ void ScanAndRecoverManager::worker_thread(Config config) {
                 scan_config.end_sector = end_sector;
                 scan_config.scan_images = config.scan_images;
                 scan_config.scan_videos = config.scan_videos;
+                scan_config.scan_audio = config.scan_audio;
+                scan_config.scan_documents = config.scan_documents;
+                scan_config.scan_archives = config.scan_archives;
                 scan_config.should_stop = [this]() { return stop_requested_.load(); };
                 scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
             }
@@ -546,6 +549,9 @@ void ScanAndRecoverManager::worker_thread(Config config) {
                 scan_config.end_sector = end_sector;
                 scan_config.scan_images = config.scan_images;
                 scan_config.scan_videos = config.scan_videos;
+                scan_config.scan_audio = config.scan_audio;
+                scan_config.scan_documents = config.scan_documents;
+                scan_config.scan_archives = config.scan_archives;
                 scan_config.should_stop = [this]() { return stop_requested_.load(); };
                 scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
             }
@@ -621,6 +627,9 @@ void ScanAndRecoverManager::worker_thread(Config config) {
             scan_config.end_sector = end_sector;
             scan_config.scan_images = config.scan_images;
             scan_config.scan_videos = config.scan_videos;
+            scan_config.scan_audio = config.scan_audio;
+            scan_config.scan_documents = config.scan_documents;
+            scan_config.scan_archives = config.scan_archives;
             scan_config.should_stop = [this]() { return stop_requested_.load(); };
             scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
         }
@@ -635,6 +644,9 @@ void ScanAndRecoverManager::worker_thread(Config config) {
         scan_config.end_sector = end_sector;
         scan_config.scan_images = config.scan_images;
         scan_config.scan_videos = config.scan_videos;
+        scan_config.scan_audio = config.scan_audio;
+        scan_config.scan_documents = config.scan_documents;
+        scan_config.scan_archives = config.scan_archives;
         scan_config.should_stop = [this]() { return stop_requested_.load(); };
         scanner.scan(reader, scan_config, on_file_found, on_scan_progress);
         break;

@@ -213,8 +213,9 @@ ValidateResult check_rar_data_impl(const uint8_t* data, size_t length, uint64_t 
     return ValidateResult::AcceptHeader;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor RAR_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor RAR_DESCRIPTOR = {
     .file_type       = FileType::Archive,
     .extension       = L"rar",
     .description     = L"RAR archive",
@@ -226,13 +227,6 @@ static const FormatDescriptor RAR_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _rar_registered = []() {
-    FormatRegistry::instance().register_format(RAR_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_rar_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

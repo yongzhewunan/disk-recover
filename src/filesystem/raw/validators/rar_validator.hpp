@@ -7,6 +7,8 @@ namespace disk_recover {
 // Validates RAR signature (RAR3.x and RAR5.x), walks block headers.
 // Uses data_check to validate multiple block headers with CRC.
 
+extern const FormatDescriptor RAR_DESCRIPTOR;
+
 ValidateResult check_rar_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_rar_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size);
 

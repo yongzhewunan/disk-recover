@@ -8,6 +8,8 @@ namespace disk_recover {
 // Uses file_check to identify specific stream names (WordDocument/Workbook/PowerPoint)
 // and calculate file size from total sectors.
 
+extern const FormatDescriptor DOC_DESCRIPTOR;
+
 ValidateResult check_doc_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_doc_file(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 

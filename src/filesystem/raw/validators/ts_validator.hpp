@@ -7,6 +7,8 @@ namespace disk_recover {
 // Validates sync byte periodicity for MTS (188-byte) and M2TS (192-byte) packets.
 // Uses data_check for progressive continuity counter validation.
 
+extern const FormatDescriptor TS_DESCRIPTOR;
+
 ValidateResult check_ts_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_ts_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size);
 

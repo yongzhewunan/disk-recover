@@ -198,15 +198,33 @@ void MainWindow::create_controls() {
     // Image/Video checkboxes
     h_chk_images_ = CreateWindowExW(0, L"BUTTON", L"Images",
         WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-        560, 12, 80, 22, hwnd_, (HMENU)IDC_CHK_IMAGES, hInst_, nullptr);
+        560, 12, 70, 22, hwnd_, (HMENU)IDC_CHK_IMAGES, hInst_, nullptr);
     SendMessageW(h_chk_images_, WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(h_chk_images_, BM_SETCHECK, BST_CHECKED, 0);
 
     h_chk_videos_ = CreateWindowExW(0, L"BUTTON", L"Videos",
         WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-        645, 12, 80, 22, hwnd_, (HMENU)IDC_CHK_VIDEOS, hInst_, nullptr);
+        635, 12, 70, 22, hwnd_, (HMENU)IDC_CHK_VIDEOS, hInst_, nullptr);
     SendMessageW(h_chk_videos_, WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(h_chk_videos_, BM_SETCHECK, BST_CHECKED, 0);
+
+    h_chk_audio_ = CreateWindowExW(0, L"BUTTON", L"Audio",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        710, 12, 65, 22, hwnd_, (HMENU)IDC_CHK_AUDIO, hInst_, nullptr);
+    SendMessageW(h_chk_audio_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_chk_audio_, BM_SETCHECK, BST_CHECKED, 0);
+
+    h_chk_documents_ = CreateWindowExW(0, L"BUTTON", L"Docs",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        780, 12, 60, 22, hwnd_, (HMENU)IDC_CHK_DOCUMENTS, hInst_, nullptr);
+    SendMessageW(h_chk_documents_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_chk_documents_, BM_SETCHECK, BST_CHECKED, 0);
+
+    h_chk_archives_ = CreateWindowExW(0, L"BUTTON", L"Archives",
+        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+        845, 12, 75, 22, hwnd_, (HMENU)IDC_CHK_ARCHIVES, hInst_, nullptr);
+    SendMessageW(h_chk_archives_, WM_SETFONT, (WPARAM)hFont, TRUE);
+    SendMessageW(h_chk_archives_, BM_SETCHECK, BST_CHECKED, 0);
 
     // --- Row 2 (y=42): Sector range ---
     CreateWindowExW(0, L"STATIC", L"Start:",
@@ -361,6 +379,9 @@ void MainWindow::on_start_pause() {
         // File type filters
         config.scan_images = (SendMessageW(h_chk_images_, BM_GETCHECK, 0, 0) == BST_CHECKED);
         config.scan_videos = (SendMessageW(h_chk_videos_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        config.scan_audio = (SendMessageW(h_chk_audio_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        config.scan_documents = (SendMessageW(h_chk_documents_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        config.scan_archives = (SendMessageW(h_chk_archives_, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
         // Sector range
         wchar_t buf_start[32] = {}, buf_end[32] = {};
@@ -513,6 +534,9 @@ void MainWindow::add_file_to_list(const RecoverableFile& file, const std::wstrin
 
     const wchar_t* type = file.file_type == FileType::Image ? L"Image"
                         : file.file_type == FileType::Video ? L"Video"
+                        : file.file_type == FileType::Audio ? L"Audio"
+                        : file.file_type == FileType::Document ? L"Doc"
+                        : file.file_type == FileType::Archive ? L"Archive"
                         : L"Other";
     ListView_SetItemText(h_list_files_, idx, 1, const_cast<LPWSTR>(type));
 
@@ -542,6 +566,9 @@ void MainWindow::enable_config_controls(bool enabled) {
     EnableWindow(h_cb_scan_mode_, enabled);
     EnableWindow(h_chk_images_, enabled);
     EnableWindow(h_chk_videos_, enabled);
+    EnableWindow(h_chk_audio_, enabled);
+    EnableWindow(h_chk_documents_, enabled);
+    EnableWindow(h_chk_archives_, enabled);
     EnableWindow(h_ed_start_sector_, enabled);
     EnableWindow(h_ed_end_sector_, enabled);
     EnableWindow(h_rb_sector_abs_, enabled);

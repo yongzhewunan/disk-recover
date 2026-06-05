@@ -179,8 +179,9 @@ ValidateResult check_png_data_impl(const uint8_t* data, size_t length, uint64_t 
     return ValidateResult::AcceptStructure;  // Keep carving
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor PNG_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor PNG_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"png",
     .description     = L"PNG image",
@@ -192,13 +193,6 @@ static const FormatDescriptor PNG_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _png_registered = []() {
-    FormatRegistry::instance().register_format(PNG_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_png_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

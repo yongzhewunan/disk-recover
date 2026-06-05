@@ -82,8 +82,9 @@ ValidateResult check_pdf_data_impl(const uint8_t* data, size_t length, uint64_t 
     return ValidateResult::AcceptStructure;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor PDF_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor PDF_DESCRIPTOR = {
     .file_type       = FileType::Document,
     .extension       = L"pdf",
     .description     = L"PDF document",
@@ -95,13 +96,6 @@ static const FormatDescriptor PDF_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _pdf_registered = []() {
-    FormatRegistry::instance().register_format(PDF_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface (for direct use by tests or legacy callers)
 ValidateResult check_pdf_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

@@ -1,5 +1,11 @@
 #pragma once
 
+// Ensure NOMINMAX is defined before including Windows headers
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <string>
 #include <fstream>
 #include <mutex>

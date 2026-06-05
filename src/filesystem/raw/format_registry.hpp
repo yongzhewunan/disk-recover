@@ -57,4 +57,9 @@ private:
     bool indexed_ = false;
 };
 
+// Register all built-in format descriptors with the given registry.
+// Called by FormatRegistry::instance() on first access.
+// Not intended to be called directly — use FormatRegistry::instance() instead.
+void register_all_formats(FormatRegistry& registry);
+
 } // namespace disk_recover

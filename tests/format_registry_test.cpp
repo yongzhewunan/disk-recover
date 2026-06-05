@@ -18,7 +18,7 @@ TEST(FormatRegistryTest, SingletonInstance) {
 
 TEST(FormatRegistryTest, HasRegisteredFormats) {
     auto& registry = FormatRegistry::instance();
-    EXPECT_GT(registry.formats().size(), 0u);
+    EXPECT_GE(registry.formats().size(), 18u);
 }
 
 TEST(FormatRegistryTest, FirstByteIndexBuilt) {
@@ -71,24 +71,25 @@ TEST(FormatRegistryTest, MatchPngHeader) {
 }
 
 TEST(FormatRegistryTest, MatchBmpHeader) {
-    uint8_t data[] = {
-        0x42, 0x4D,             // "BM"
-        0x36, 0x00, 0x00, 0x00, // File size: 54
-        0x00, 0x00,             // Reserved1
-        0x00, 0x00,             // Reserved2
-        0x36, 0x00, 0x00, 0x00, // Pixel offset: 54
-        0x28, 0x00, 0x00, 0x00, // DIB header size: 40
-        0x01, 0x00, 0x00, 0x00, // Width: 1
-        0x01, 0x00, 0x00, 0x00, // Height: 1
-        0x01, 0x00,             // Planes: 1
-        0x18, 0x00,             // BPP: 24
-        0x00, 0x00, 0x00, 0x00, // Compression: BI_RGB
-        0x00, 0x00, 0x00, 0x00, // Image size
-        0x00, 0x00, 0x00, 0x00, // X pixels/m
-        0x00, 0x00, 0x00, 0x00, // Y pixels/m
-        0x00, 0x00, 0x00, 0x00, // Colors used
-        0x00, 0x00, 0x00, 0x00  // Important colors
-    };
+    // BMP with all fields valid per bmp_validator.cpp requirements:
+    // - file_size >= 54, pixel_offset >= 54
+    // - dib_size in {12,40,52,56,64,108,124}
+    // - planes == 1, bpp in {1,4,8,16,24,32}
+    // - compression in {0-5}
+    // - width > 0, height != 0
+    uint8_t data[54] = {};
+    data[0] = 0x42; data[1] = 0x4D;             // "BM"
+    // File size: 54 (LE32 at offset 2)
+    data[2] = 0x36; data[3] = 0x00; data[4] = 0x00; data[5] = 0x00;
+    // Reserved1+2 (offsets 6-13)
+    data[10] = 0x36; data[11] = 0x00; data[12] = 0x00; data[13] = 0x00; // Pixel offset: 54
+    data[14] = 0x28; data[15] = 0x00; data[16] = 0x00; data[17] = 0x00; // DIB header size: 40
+    data[18] = 0x01; data[19] = 0x00; data[20] = 0x00; data[21] = 0x00; // Width: 1
+    data[22] = 0x01; data[23] = 0x00; data[24] = 0x00; data[25] = 0x00; // Height: 1
+    data[26] = 0x01; data[27] = 0x00;  // Planes: 1
+    data[28] = 0x18; data[29] = 0x00;  // BPP: 24
+    // Compression: BI_RGB (0) at offset 30 — already zero
+    // Remaining fields (offsets 34-53) are zero — valid defaults
     auto result = FormatRegistry::instance().match(data, sizeof(data));
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->result, ValidateResult::AcceptVerified);
@@ -157,24 +158,31 @@ TEST(FormatRegistryTest, MatchRarHeader) {
 }
 
 TEST(FormatRegistryTest, MatchDocOle2Header) {
-    const uint8_t data[] = {
-        0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1,  // OLE2 signature
-        0xFE, 0xFF,  // Byte order: little-endian (0xFFFE)
-        0x00, 0x02,  // Sector size power: 9 (512 bytes)
-        0x00, 0x06,  // Mini sector size power: 6 (64 bytes)
-        0x00, 0x00, 0x00, 0x00,  // Reserved
-        0x00, 0x00, 0x00, 0x00,  // Total directory sectors (0 for V3)
-        0x00, 0x00, 0x00, 0x00,  // Total FAT sectors
-        0x02, 0x00, 0x00, 0x00,  // First directory sector ID
-        0x00, 0x00, 0x00, 0x00,  // First mini FAT sector ID
-        0x00, 0x00, 0x00, 0x00,  // First DIFAT sector ID
-        0x00, 0x00, 0x00, 0x00,  // Total DIFAT sectors
-        // 109 DIFAT entries (all zero)
-    };
-    // Pad to at least 512 bytes
-    uint8_t padded[512] = {};
-    memcpy(padded, data, sizeof(data));
-    auto result = FormatRegistry::instance().match(padded, sizeof(padded));
+    // OLE2 header is 512 bytes minimum. Fields at correct offsets per MS-CFB spec:
+    //   offset  0: 8-byte signature D0CF11E0A1B11AE1
+    //   offset 28: byte_order (0xFFFE = little-endian)
+    //   offset 30: sector_size_pow (9 = 512 bytes)
+    //   offset 32: mini_sector_size_pow (6 = 64 bytes)
+    //   offset 44: total_fat_sectors (must be >0)
+    //   offset 48: first_dir_sector_id (must not be 0xFFFFFFFF)
+    //   offset 56: mini_stream_cutoff (must be >0, typically 4096)
+    uint8_t data[512] = {};
+    // 8-byte OLE2 signature at offset 0
+    data[0] = 0xD0; data[1] = 0xCF; data[2] = 0x11; data[3] = 0xE0;
+    data[4] = 0xA1; data[5] = 0xB1; data[6] = 0x1A; data[7] = 0xE1;
+    // Byte order at offset 28: 0xFFFE (little-endian)
+    data[28] = 0xFE; data[29] = 0xFF;
+    // Sector size power at offset 30: 9 (512 bytes)
+    data[30] = 0x09; data[31] = 0x00;
+    // Mini sector size power at offset 32: 6 (64 bytes)
+    data[32] = 0x06; data[33] = 0x00;
+    // Total FAT sectors at offset 44: 1
+    data[44] = 0x01; data[45] = 0x00; data[46] = 0x00; data[47] = 0x00;
+    // First directory sector SECID at offset 48: 0 (valid)
+    data[48] = 0x00; data[49] = 0x00; data[50] = 0x00; data[51] = 0x00;
+    // Mini stream cutoff at offset 56: 4096 (0x1000)
+    data[56] = 0x00; data[57] = 0x10; data[58] = 0x00; data[59] = 0x00;
+    auto result = FormatRegistry::instance().match(data, sizeof(data));
     ASSERT_TRUE(result.has_value());
     EXPECT_NE(result->result, ValidateResult::Reject);
     EXPECT_EQ(result->descriptor->file_type, FileType::Document);

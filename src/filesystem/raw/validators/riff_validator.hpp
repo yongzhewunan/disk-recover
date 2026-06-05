@@ -7,6 +7,11 @@ namespace disk_recover {
 // Validates RIFF header + container type dispatch (AVI, WebP, WAV).
 // Size is determinable from header (riff_size + 8).
 
+extern const FormatDescriptor WEBP_DESCRIPTOR;
+extern const FormatDescriptor AVI_DESCRIPTOR;
+extern const FormatDescriptor WAV_DESCRIPTOR;
+extern const FormatDescriptor RIFF_GENERIC_DESCRIPTOR;
+
 ValidateResult check_riff_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 
 } // namespace disk_recover

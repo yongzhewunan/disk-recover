@@ -7,6 +7,8 @@ namespace disk_recover {
 // Uses marker state machine for header validation and EOI search for data_check.
 // Inspired by PhotoRec's file_jpg.c three-phase model.
 
+extern const FormatDescriptor JPEG_DESCRIPTOR;
+
 ValidateResult check_jpeg_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_jpeg_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size);
 

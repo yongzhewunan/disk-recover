@@ -179,8 +179,9 @@ ValidateResult check_flac_file_impl(const uint8_t* data, size_t length, uint64_t
     return ValidateResult::AcceptVerified;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor FLAC_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor FLAC_DESCRIPTOR = {
     .file_type       = FileType::Audio,
     .extension       = L"flac",
     .description     = L"FLAC audio",
@@ -192,13 +193,6 @@ static const FormatDescriptor FLAC_DESCRIPTOR = {
     .file_check      = check_flac_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _flac_registered = []() {
-    FormatRegistry::instance().register_format(FLAC_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_flac_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

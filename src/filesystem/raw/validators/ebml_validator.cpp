@@ -237,10 +237,9 @@ ValidateResult check_ebml_file_impl(const uint8_t* data, size_t length, uint64_t
     return ValidateResult::AcceptContainer;
 }
 
-// Auto-registration with FormatRegistry
-// Note: EBML can be either MKV or WebM; we register as MKV (more common)
-// and the file_check can refine the extension if needed.
-static const FormatDescriptor EBML_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor EBML_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"mkv",
     .description     = L"MKV/WebM video",
@@ -252,13 +251,6 @@ static const FormatDescriptor EBML_DESCRIPTOR = {
     .file_check      = check_ebml_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _ebml_registered = []() {
-    FormatRegistry::instance().register_format(EBML_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_ebml_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

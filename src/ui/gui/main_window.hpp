@@ -67,6 +67,9 @@ private:
     HWND h_cb_scan_mode_ = nullptr;
     HWND h_chk_images_ = nullptr;
     HWND h_chk_videos_ = nullptr;
+    HWND h_chk_audio_ = nullptr;
+    HWND h_chk_documents_ = nullptr;
+    HWND h_chk_archives_ = nullptr;
     HWND h_ed_start_sector_ = nullptr;
     HWND h_ed_end_sector_ = nullptr;
     HWND h_rb_sector_abs_ = nullptr;

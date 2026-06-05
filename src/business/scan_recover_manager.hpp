@@ -51,6 +51,9 @@ public:
         // File type filters
         bool scan_images = true;
         bool scan_videos = true;
+        bool scan_audio = true;
+        bool scan_documents = true;
+        bool scan_archives = true;
 
         // Sector range
         uint64_t start_sector = 0;

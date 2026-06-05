@@ -1,8 +1,14 @@
-// Central validator registration — ensures all validator objects are linked.
-// On MSVC, the linker may strip static initializer objects from static libraries
-// if no other code references them. This file provides explicit symbol references
-// that force the linker to include every validator's .obj file, ensuring their
-// auto-registration static initializers run before main().
+// Central validator registration — explicitly registers all format descriptors.
+// This replaces the unreliable auto-registration via static initializers,
+// which was stripped by MSVC's linker when consuming validators from a static library.
+// By calling register_all_formats() from FormatRegistry::instance(), we guarantee
+// all descriptors are registered before any match() calls, regardless of linker behavior.
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include "format_registry.hpp"
 
 #include "validators/bmp_validator.hpp"
 #include "validators/wmv_validator.hpp"
@@ -22,43 +28,44 @@
 #include "validators/doc_validator.hpp"
 #include "validators/mp3_validator.hpp"
 #include "validators/flac_validator.hpp"
-#include "format_registry.hpp"
 
 namespace disk_recover {
 
-// Force linkage by taking the address of each validator's public function.
-// This ensures the linker pulls in the corresponding .obj from the static library,
-// which in turn ensures the static initializer that registers with FormatRegistry runs.
-struct ForceLink {
-    ForceLink() {
-        (void)check_bmp_header;
-        (void)check_wmv_header;
-        (void)check_flv_header;
-        (void)check_jpeg_header;
-        (void)check_png_header;
-        (void)check_gif_header;
-        (void)check_tiff_header;
-        (void)check_riff_header;
-        (void)check_bmff_header;
-        (void)check_ebml_header;
-        (void)check_ts_header;
-        (void)check_pdf_header;
-        (void)check_zip_header;
-        (void)check_7z_header;
-        (void)check_rar_header;
-        (void)check_doc_header;
-        (void)check_mp3_header;
-        (void)check_flac_header;
-    }
-};
+void register_all_formats(FormatRegistry& registry) {
+    // Image formats
+    registry.register_format(BMP_DESCRIPTOR);
+    registry.register_format(JPEG_DESCRIPTOR);
+    registry.register_format(PNG_DESCRIPTOR);
+    registry.register_format(GIF_DESCRIPTOR);
+    registry.register_format(TIFF_LE_DESCRIPTOR);
+    registry.register_format(TIFF_BE_DESCRIPTOR);
+    registry.register_format(ORF_DESCRIPTOR);
+    registry.register_format(WEBP_DESCRIPTOR);
 
-static ForceLink _force_validator_linkage;
+    // Video formats
+    registry.register_format(AVI_DESCRIPTOR);
+    registry.register_format(BMFF_VIDEO_DESCRIPTOR);
+    registry.register_format(EBML_DESCRIPTOR);
+    registry.register_format(TS_DESCRIPTOR);
+    registry.register_format(WMV_DESCRIPTOR);
+    registry.register_format(FLV_DESCRIPTOR);
+    registry.register_format(RIFF_GENERIC_DESCRIPTOR);
 
-void ensure_all_validators_linked() {
-    // This function can be called to ensure the ForceLink constructor has run.
-    // In practice, the static initializer above runs before main().
-    (void)_force_validator_linkage;
-    FormatRegistry::instance();
+    // Audio formats
+    registry.register_format(WAV_DESCRIPTOR);
+    registry.register_format(BMFF_AUDIO_DESCRIPTOR);
+    registry.register_format(BMFF_IMAGE_DESCRIPTOR);  // HEIC/HEIF image variant
+    registry.register_format(MP3_DESCRIPTOR);
+    registry.register_format(FLAC_DESCRIPTOR);
+
+    // Document formats
+    registry.register_format(PDF_DESCRIPTOR);
+    registry.register_format(DOC_DESCRIPTOR);
+
+    // Archive formats
+    registry.register_format(ZIP_DESCRIPTOR);
+    registry.register_format(SEVENZ_DESCRIPTOR);
+    registry.register_format(RAR_DESCRIPTOR);
 }
 
 } // namespace disk_recover

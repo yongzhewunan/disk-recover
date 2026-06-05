@@ -1,3 +1,8 @@
+// Ensure NOMINMAX is defined before including Windows headers
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "format_registry.hpp"
 #include <cstring>
 #include <algorithm>
@@ -6,6 +11,11 @@ namespace disk_recover {
 
 FormatRegistry& FormatRegistry::instance() {
     static FormatRegistry registry;
+    // Explicitly register all format descriptors on first call.
+    // This replaces unreliable auto-registration via static initializers
+    // which were stripped by MSVC's linker in Release builds.
+    static bool once = []() { register_all_formats(registry); return true; }();
+    (void)once;
     return registry;
 }
 
@@ -64,6 +74,7 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
 
     // Phase 1: Check first-byte indexed signatures (offset == 0)
     const auto& candidates = first_byte_index_[data[0]];
+
     for (const auto* fmt : candidates) {
         // Quick signature match check before calling header_check
         if (fmt->signature.offset == 0 &&

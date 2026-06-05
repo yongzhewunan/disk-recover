@@ -14,8 +14,9 @@ static const uint8_t TS_MAGIC[] = {0x47};
 // ── Phase 1: Header check ──
 // Detects M2TS (192-byte packets with 4-byte timestamp prefix) vs MTS (188-byte packets).
 // Uses sliding sync search for 0x47 at 188-byte intervals.
-// Periodicity check across 5-10 packets.
-// Returns AcceptStructure if periodicity confirmed.
+// Requires minimum 3 consecutive syncs for AcceptHeader, 5+ for AcceptStructure.
+// Includes PID consistency check to reduce false positives.
+// Returns AcceptStructure if periodicity and PID patterns confirmed.
 ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     // Minimum length for validation (need multiple packets for confidence)
     if (length < 188) return ValidateResult::Reject;
@@ -88,6 +89,7 @@ ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t
     // Phase 2: Enhanced periodicity check (5-10 packets for high confidence)
     // This is critical for distinguishing TS from random data
     constexpr int MIN_PACKETS_FOR_STRUCTURE = 5;
+    constexpr int MIN_PACKETS_FOR_HEADER = 3;  // Increased from 2 to reduce false positives
     constexpr int MAX_PACKETS_TO_SCAN = 10;
 
     int sync_count_extended = 0;
@@ -99,22 +101,72 @@ ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t
         }
     }
 
-    // Require minimum sync count for acceptance
-    if (sync_count_extended < 2) {
-        // Single sync - weak signal, may be false positive
-        if (length >= 188 && data[0] == 0x47 && sync_count_extended == 1) {
-            return ValidateResult::AcceptHeader;  // Minimal match
+    // Phase 3: PID consistency check
+    // Known valid PIDs: 0x0000 (PAT), 0x0001 (CAT), 0x0010-0x001F (NIT/PMT range), 0x1FFF (null packet)
+    // Real TS streams typically have consistent PIDs or known patterns
+    bool has_valid_pid_pattern = false;
+    int valid_pid_count = 0;
+    int unique_pids = 0;
+    int last_pid = -1;
+    constexpr int KNOWN_PIDS[] = {0x0000, 0x0001, 0x0010, 0x0011, 0x0012, 0x001F, 0x1FFF};
+
+    for (int packet = 0; packet < sync_count_extended && best_sync_offset + packet * packet_size + 4 <= static_cast<int>(length); ++packet) {
+        size_t pos = best_sync_offset + packet * packet_size;
+        if (data[pos] != 0x47) continue;
+
+        // Parse PID from TS header (bytes 1-2)
+        uint8_t byte1 = data[pos + 1];
+        uint8_t byte2 = data[pos + 2];
+        int pid = ((byte1 & 0x1F) << 8) | byte2;
+
+        // Check for transport error indicator (bit 7 of byte1)
+        bool has_error = (byte1 & 0x80) != 0;
+        if (!has_error) {
+            ++valid_pid_count;
+
+            // Check if PID is known pattern
+            for (int known_pid : KNOWN_PIDS) {
+                if (pid == known_pid) {
+                    has_valid_pid_pattern = true;
+                    break;
+                }
+            }
+
+            // Count unique PIDs (excluding null packets 0x1FFF)
+            if (pid != last_pid && pid != 0x1FFF) {
+                ++unique_pids;
+                last_pid = pid;
+            }
         }
-        return ValidateResult::Reject;
     }
 
-    // Periodicity confirmed with 5+ packets
-    if (sync_count_extended >= MIN_PACKETS_FOR_STRUCTURE) {
+    // Require minimum sync count for acceptance
+    // Single or double sync byte is NOT sufficient (removed old AcceptHeader for 1-2 syncs)
+    if (sync_count_extended < MIN_PACKETS_FOR_HEADER) {
+        return ValidateResult::Reject;  // Insufficient syncs - likely false positive
+    }
+
+    // Check PID pattern quality
+    // Good patterns: known PIDs present, or few unique PIDs (consistent stream)
+    bool good_pid_quality = has_valid_pid_pattern || (unique_pids <= 3 && valid_pid_count >= sync_count_extended - 1);
+
+    // Periodicity confirmed with 5+ packets AND good PID pattern
+    if (sync_count_extended >= MIN_PACKETS_FOR_STRUCTURE && good_pid_quality) {
         return ValidateResult::AcceptStructure;
     }
 
-    // 2-4 packets: partial periodicity
-    return ValidateResult::AcceptHeader;
+    // 3-4 packets with good PID pattern: partial confidence
+    if (sync_count_extended >= MIN_PACKETS_FOR_HEADER && good_pid_quality) {
+        return ValidateResult::AcceptHeader;
+    }
+
+    // 3-4 packets but poor PID pattern: still AcceptHeader but lower confidence
+    // This allows damaged TS streams to be detected
+    if (sync_count_extended >= MIN_PACKETS_FOR_HEADER) {
+        return ValidateResult::AcceptHeader;
+    }
+
+    return ValidateResult::Reject;
 }
 
 // ── Phase 2: Data check ──
@@ -206,13 +258,18 @@ ValidateResult check_ts_data_impl(const uint8_t* data, size_t length, uint64_t o
         return ValidateResult::AcceptStructure;
     }
 
-    // Keep carving even with minimal validation
-    return ValidateResult::AcceptHeader;
+    // Single valid packet: AcceptHeader
+    if (valid_packets >= 1) {
+        return ValidateResult::AcceptHeader;
+    }
+
+    // No valid packets found - reject
+    return ValidateResult::Reject;
 }
 
-// Auto-registration with FormatRegistry
-// Note: MPEG-TS can be MTS or M2TS; we register as MTS (more common).
-static const FormatDescriptor TS_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor TS_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"mts",
     .description     = L"MPEG-TS/AVCHD video",
@@ -220,17 +277,10 @@ static const FormatDescriptor TS_DESCRIPTOR = {
     .max_filesize    = 0,
     .signature       = {TS_MAGIC, 1, 0},
     .header_check    = check_ts_header_impl,
-    .data_check      = check_ts_data_impl,
+    .data_check      = nullptr,  // TS is streaming format, no embedded size - skip progressive carving to save ~50MB I/O per false positive
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _ts_registered = []() {
-    FormatRegistry::instance().register_format(TS_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_ts_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

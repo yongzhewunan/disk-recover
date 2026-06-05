@@ -7,6 +7,8 @@ namespace disk_recover {
 // Validates EBML header signature, parses DocType to distinguish MKV vs WebM.
 // Uses file_check to calculate file size from Segment element.
 
+extern const FormatDescriptor EBML_DESCRIPTOR;
+
 ValidateResult check_ebml_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_ebml_file(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 

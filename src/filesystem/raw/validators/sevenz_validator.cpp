@@ -73,8 +73,9 @@ ValidateResult check_sevenz_file_impl(const uint8_t* data, size_t length, uint64
     return ValidateResult::AcceptVerified;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor SEVENZ_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor SEVENZ_DESCRIPTOR = {
     .file_type       = FileType::Archive,
     .extension       = L"7z",
     .description     = L"7-Zip archive",
@@ -86,13 +87,6 @@ static const FormatDescriptor SEVENZ_DESCRIPTOR = {
     .file_check      = check_sevenz_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _sevenz_registered = []() {
-    FormatRegistry::instance().register_format(SEVENZ_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface (for direct use by tests or legacy callers)
 ValidateResult check_sevenz_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

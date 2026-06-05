@@ -7,6 +7,10 @@ namespace disk_recover {
 // Validates TIFF header + IFD0 structure with vendor detection for RAW formats.
 // Uses file_check for IFD walking to calculate file size from strip/tile offsets.
 
+extern const FormatDescriptor TIFF_LE_DESCRIPTOR;
+extern const FormatDescriptor TIFF_BE_DESCRIPTOR;
+extern const FormatDescriptor ORF_DESCRIPTOR;
+
 ValidateResult check_tiff_raw_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_tiff_raw_file(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 

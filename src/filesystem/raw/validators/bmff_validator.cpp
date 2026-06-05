@@ -196,14 +196,9 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
     return ValidateResult::AcceptVerified;
 }
 
-// ============================================================================
-// Auto-registration with FormatRegistry
-// Three descriptors for the three BMFF file type categories.
-// All share the same ftyp signature at offset 4.
-// The registry tries all matching descriptors and picks the deepest result.
-// ============================================================================
+} // anonymous namespace
 
-static const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
+const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"heic",
     .description     = L"HEIC/AVIF (ISO BMFF Image)",
@@ -216,12 +211,7 @@ static const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _bmff_image_registered = []() {
-    FormatRegistry::instance().register_format(BMFF_IMAGE_DESCRIPTOR);
-    return true;
-}();
-
-static const FormatDescriptor BMFF_VIDEO_DESCRIPTOR = {
+const FormatDescriptor BMFF_VIDEO_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"mp4",
     .description     = L"MP4/MOV (ISO BMFF Video)",
@@ -234,12 +224,7 @@ static const FormatDescriptor BMFF_VIDEO_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _bmff_video_registered = []() {
-    FormatRegistry::instance().register_format(BMFF_VIDEO_DESCRIPTOR);
-    return true;
-}();
-
-static const FormatDescriptor BMFF_AUDIO_DESCRIPTOR = {
+const FormatDescriptor BMFF_AUDIO_DESCRIPTOR = {
     .file_type       = FileType::Audio,
     .extension       = L"m4a",
     .description     = L"M4A (ISO BMFF Audio)",
@@ -251,13 +236,6 @@ static const FormatDescriptor BMFF_AUDIO_DESCRIPTOR = {
     .file_check      = check_bmff_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _bmff_audio_registered = []() {
-    FormatRegistry::instance().register_format(BMFF_AUDIO_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_bmff_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

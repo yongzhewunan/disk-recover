@@ -225,8 +225,9 @@ ValidateResult check_doc_file_impl(const uint8_t* data, size_t length, uint64_t&
     return ValidateResult::AcceptVerified;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor DOC_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor DOC_DESCRIPTOR = {
     .file_type       = FileType::Document,
     .extension       = L"doc",
     .description     = L"DOC/OLE2 compound document",
@@ -238,13 +239,6 @@ static const FormatDescriptor DOC_DESCRIPTOR = {
     .file_check      = check_doc_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _doc_registered = []() {
-    FormatRegistry::instance().register_format(DOC_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_doc_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

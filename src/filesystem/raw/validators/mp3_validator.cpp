@@ -297,8 +297,9 @@ ValidateResult check_mp3_data_impl(const uint8_t* data, size_t length, uint64_t 
     return ValidateResult::AcceptHeader;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor MP3_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor MP3_DESCRIPTOR = {
     .file_type       = FileType::Audio,
     .extension       = L"mp3",
     .description     = L"MP3 audio",
@@ -310,13 +311,6 @@ static const FormatDescriptor MP3_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _mp3_registered = []() {
-    FormatRegistry::instance().register_format(MP3_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_mp3_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

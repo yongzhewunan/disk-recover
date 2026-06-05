@@ -14,12 +14,15 @@
 #define IDC_CB_SCAN_MODE        1011   // Quick/Deep/Full dropdown
 #define IDC_CHK_IMAGES          1012   // Image filter checkbox
 #define IDC_CHK_VIDEOS          1013   // Video filter checkbox
-#define IDC_ED_START_SECTOR     1014   // Start sector input
-#define IDC_ED_END_SECTOR       1015   // End sector input
-#define IDC_RB_SECTOR_ABS       1016   // Absolute sector radio
-#define IDC_RB_SECTOR_PCT       1017   // Percentage radio
-#define IDC_BTN_SAVE_DIRS       1018   // Save dirs dialog button
-#define IDC_ST_SAVE_INFO        1019   // Save dirs summary label
+#define IDC_CHK_AUDIO           1014   // Audio filter checkbox
+#define IDC_CHK_DOCUMENTS       1015   // Document filter checkbox
+#define IDC_CHK_ARCHIVES        1016   // Archive filter checkbox
+#define IDC_ED_START_SECTOR     1017   // Start sector input
+#define IDC_ED_END_SECTOR       1018   // End sector input
+#define IDC_RB_SECTOR_ABS       1019   // Absolute sector radio
+#define IDC_RB_SECTOR_PCT       1020   // Percentage radio
+#define IDC_BTN_SAVE_DIRS       1021   // Save dirs dialog button
+#define IDC_ST_SAVE_INFO        1022   // Save dirs summary label
 
 // Menu command IDs (2000-2999)
 #define IDM_SCAN                2001

@@ -7,6 +7,8 @@ namespace disk_recover {
 // Validates PNG signature, IHDR chunk, and scans for IEND.
 // Uses data_check for progressive chunk walking with CRC verification.
 
+extern const FormatDescriptor PNG_DESCRIPTOR;
+
 ValidateResult check_png_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_png_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size);
 

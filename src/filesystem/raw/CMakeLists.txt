@@ -10,6 +10,7 @@ set(VALIDATOR_SOURCES
     validators/ebml_validator.cpp
     validators/ts_validator.cpp
     validators/wmv_validator.cpp
+    validators/flv_validator.cpp
     validators/pdf_validator.cpp
     validators/zip_validator.cpp
     validators/sevenz_validator.cpp
@@ -27,7 +28,8 @@ add_library(disk_recover_filesystem_raw STATIC
     ${VALIDATOR_SOURCES}
 )
 
-# Prevent MSVC linker from stripping static initializer objects that auto-register validators
+# Prevent MSVC linker from stripping .obj files from the static library
+# that contain the FormatDescriptor definitions needed by register_all_formats()
 if(MSVC)
     target_link_options(disk_recover_filesystem_raw PUBLIC /OPT:NOREF)
 endif()

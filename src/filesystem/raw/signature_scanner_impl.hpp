@@ -353,9 +353,18 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
     progress.sectors_scanned = initial_scanned;
 
-    LOG_FMT(L"[SigScanner] Starting RAW scan: sector %llu to %llu, total=%llu, resume_from=%llu, scan_start=%llu",
-             config.start_sector, config.end_sector, progress.total_sectors,
-             config.resume_from_sector, scan_start);
+    LOG_FMT(L"[SigScanner] Starting RAW scan: sector %llu to %llu, total=%llu",
+             config.start_sector, config.end_sector, progress.total_sectors);
+
+    // Test FormatRegistry initialization before main scan loop
+    uint8_t test_jpeg[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01};
+    auto test_match = FormatRegistry::instance().match(test_jpeg, sizeof(test_jpeg));
+    if (test_match) {
+        LOG_FMT(L"[SigScanner] FormatRegistry OK: JPEG test match '%hs' result=%d",
+                 test_match->descriptor->extension, static_cast<int>(test_match->result));
+    } else {
+        LOG_MSG(L"[SigScanner] ERROR: FormatRegistry test FAILED - no formats registered!");
+    }
 
     AlignedBuffer batch_buf(BATCH_SECTORS * sector_size, sector_size);
     if (batch_buf.empty()) {
@@ -373,10 +382,15 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
     uint64_t last_save_sector = scan_start;
     uint32_t consecutive_bad_batches = 0;
 
+    // Periodic video dispatch configuration
+    constexpr uint32_t VIDEO_DISPATCH_THRESHOLD = 100;    // Dispatch when video_files exceeds this
+    constexpr uint64_t VIDEO_DISPATCH_SECTORS = 1000000; // Dispatch every 1M sectors
+    uint64_t last_video_dispatch_sector = scan_start;
+
     // Exponential backoff skip configuration
     const SkipAheadConfig& skip_cfg = reader.skip_ahead_config();
     uint64_t current_skip_distance = skip_cfg.skip_distance_sectors;
-    const uint64_t max_skip_distance = 65536;  // Cap at 32MB (65536 sectors * 512 bytes)
+    const uint64_t max_skip_distance = 65536;
 
     for (uint64_t sector = scan_start; sector < config.end_sector; sector += BATCH_SECTORS) {
         if (config.should_stop && config.should_stop()) {
@@ -392,7 +406,6 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
         if (bad_count == batch_count) {
             consecutive_bad_batches++;
-            // Use configured threshold with exponential backoff
             if (skip_cfg.enabled && consecutive_bad_batches >= skip_cfg.consecutive_bad_threshold) {
                 uint64_t actual_skip = (std::min)(current_skip_distance, config.end_sector - sector);
                 progress.sectors_scanned += actual_skip;
@@ -402,16 +415,12 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
                 } else {
                     sector -= (BATCH_SECTORS - actual_skip);
                 }
-                // Exponential backoff: double skip distance for next time
                 current_skip_distance = (std::min)(current_skip_distance * 2, max_skip_distance);
                 consecutive_bad_batches = 0;
-                LOG_FMT(L"[SigScanner] Adaptive skip: jumping %llu sectors to %llu (next skip=%llu)",
-                         actual_skip, sector + BATCH_SECTORS, current_skip_distance);
                 continue;
             }
         } else {
             consecutive_bad_batches = 0;
-            // Good read - reset to initial skip distance
             current_skip_distance = skip_cfg.skip_distance_sectors;
         }
 
@@ -446,12 +455,21 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
                 claimed_end_sector = file_end;
 
                 if (sig_count <= 10) {
-                    LOG_FMT(L"[SigScanner] Found %s at sector %llu, size=%llu, validation=%u",
-                             desc->description, cur_sector, file.file_size,
-                             static_cast<unsigned>(match_result->result));
+                    LOG_FMT(L"[SigScanner] Found #%u: %s at sector %llu, size=%llu",
+                             sig_count, desc->description, cur_sector, file.file_size);
                 }
                 if (file.file_type == FileType::Video) {
                     video_files.push_back(std::move(file));
+
+                    // Periodic dispatch: when video_files exceeds threshold
+                    if (video_files.size() >= VIDEO_DISPATCH_THRESHOLD) {
+                        auto merged = merge_video_fragments(video_files, sector_size);
+                        for (auto& vf : merged) {
+                            if (on_file_found) on_file_found(std::move(vf));
+                        }
+                        video_files.clear();
+                        last_video_dispatch_sector = sector;
+                    }
                 } else {
                     if (on_file_found) on_file_found(std::move(file));
                 }
@@ -469,11 +487,22 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
             last_save_time = now;
             last_save_sector = sector;
             if (on_progress) on_progress(progress);
+
+            // Periodic dispatch: every VIDEO_DISPATCH_SECTORS sectors
+            uint64_t sectors_since_video_dispatch = sector - last_video_dispatch_sector;
+            if (sectors_since_video_dispatch >= VIDEO_DISPATCH_SECTORS && !video_files.empty()) {
+                auto merged = merge_video_fragments(video_files, sector_size);
+                for (auto& vf : merged) {
+                    if (on_file_found) on_file_found(std::move(vf));
+                }
+                video_files.clear();
+                last_video_dispatch_sector = sector;
+            }
         }
     }
 
     LOG_FMT(L"[SigScanner] RAW scan complete: signatures=%u, files_found=%llu, sectors_scanned=%llu",
-             sig_count, progress.files_found, progress.sectors_scanned);
+             sig_count, static_cast<unsigned long long>(progress.files_found), static_cast<unsigned long long>(progress.sectors_scanned));
 
     auto merged = merge_video_fragments(video_files, sector_size);
     for (auto& file : merged) {

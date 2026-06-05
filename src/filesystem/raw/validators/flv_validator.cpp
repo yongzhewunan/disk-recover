@@ -39,8 +39,9 @@ ValidateResult check_flv_header_impl(const uint8_t* data, size_t length, uint64_
     return ValidateResult::AcceptHeader;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor FLV_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor FLV_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"flv",
     .description     = L"Flash Video",
@@ -52,13 +53,6 @@ static const FormatDescriptor FLV_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _flv_registered = []() {
-    FormatRegistry::instance().register_format(FLV_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_flv_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

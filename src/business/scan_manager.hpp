@@ -30,6 +30,9 @@ public:
         BadSectorPolicy bad_sector_policy = BadSectorPolicy::Skip;
         bool scan_images = true;
         bool scan_videos = true;
+        bool scan_audio = true;
+        bool scan_documents = true;
+        bool scan_archives = true;
         uint64_t start_sector = 0;
         uint64_t end_sector = 0;
     };

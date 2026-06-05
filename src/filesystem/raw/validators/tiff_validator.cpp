@@ -296,13 +296,10 @@ ValidateResult check_tiff_raw_file_impl(const uint8_t* data, size_t length, uint
     return ValidateResult::AcceptVerified;
 }
 
-// ============================================================================
-// Auto-registration with FormatRegistry
-// Three descriptors for the three TIFF/RAW signature patterns.
-// ============================================================================
+} // anonymous namespace
 
 // TIFF Little-Endian
-static const FormatDescriptor TIFF_LE_DESCRIPTOR = {
+const FormatDescriptor TIFF_LE_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"tiff",
     .description     = L"TIFF-LE",
@@ -315,13 +312,8 @@ static const FormatDescriptor TIFF_LE_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _tiff_le_registered = []() {
-    FormatRegistry::instance().register_format(TIFF_LE_DESCRIPTOR);
-    return true;
-}();
-
 // TIFF Big-Endian
-static const FormatDescriptor TIFF_BE_DESCRIPTOR = {
+const FormatDescriptor TIFF_BE_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"tiff",
     .description     = L"TIFF-BE",
@@ -334,13 +326,8 @@ static const FormatDescriptor TIFF_BE_DESCRIPTOR = {
     .enabled_by_default = true,
 };
 
-static bool _tiff_be_registered = []() {
-    FormatRegistry::instance().register_format(TIFF_BE_DESCRIPTOR);
-    return true;
-}();
-
 // Olympus ORF (IIRO signature)
-static const FormatDescriptor ORF_DESCRIPTOR = {
+const FormatDescriptor ORF_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"orf",
     .description     = L"Olympus ORF",
@@ -352,13 +339,6 @@ static const FormatDescriptor ORF_DESCRIPTOR = {
     .file_check      = check_tiff_raw_file_impl,
     .enabled_by_default = true,
 };
-
-static bool _orf_registered = []() {
-    FormatRegistry::instance().register_format(ORF_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_tiff_raw_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

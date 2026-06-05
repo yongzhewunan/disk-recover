@@ -145,25 +145,35 @@ ValidateResult check_jpeg_header_impl(const uint8_t* data, size_t length, uint64
 
 scan_done:
 
-    // Hard requirements: SOF and SOS are mandatory for a decodable JPEG
-    if (!found_sof) return ValidateResult::Reject;
-    if (!found_sos) return ValidateResult::Reject;
+    // ── Phase 1 header_check: Accept if SOI magic is valid ──
+    // Real-world JPEGs often have large Exif/APP segments that push SOF/SOS
+    // beyond the first sector (512 bytes). We should not reject these valid files.
+    // Instead, return AcceptHeader and let data_check progressively validate.
 
-    // Determine result depth based on what was found
-    if (found_eoi && last_eoi_pos >= 64) {
-        calculated_file_size = last_eoi_pos;
-        return ValidateResult::AcceptVerified;  // Full validation + size known
+    // If we found complete structure in the buffer, return best result
+    if (found_sof && found_sos) {
+        if (found_eoi && last_eoi_pos >= 64) {
+            calculated_file_size = last_eoi_pos;
+            return ValidateResult::AcceptVerified;  // Full validation + size known
+        }
+        return ValidateResult::AcceptStructure;  // Valid JPEG structure but no EOI
     }
 
-    // Valid JPEG structure but no EOI (truncated or only partial data in buffer)
-    return ValidateResult::AcceptStructure;
+    // SOI found but SOF/SOS beyond buffer - still a valid JPEG candidate
+    // The scanner will call data_check to progressively validate as it reads more
+    return ValidateResult::AcceptHeader;
 }
 
 // ── Phase 2: Data check (progressive EOI search) ──
 // Called by scanner per block during carving. Scans for EOI marker
 // respecting byte stuffing (FF 00) and restart markers (FF D0-D7).
+// Also tracks SOF/SOS presence for validation.
 ValidateResult check_jpeg_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
-    // Scan for EOI marker (FF D9) in this block
+    // Track if we find SOF/SOS in this block (for validation)
+    bool found_sof = false;
+    bool found_sos = false;
+
+    // Scan for markers in this block
     for (size_t i = 0; i + 1 < length; ++i) {
         if (data[i] != 0xFF) continue;
 
@@ -175,19 +185,37 @@ ValidateResult check_jpeg_data_impl(const uint8_t* data, size_t length, uint64_t
         // FF D0-D7 — restart markers, skip
         if (next >= 0xD0 && next <= 0xD7) continue;
 
+        // FF D8 — embedded SOI (thumbnail), skip
+        if (next == 0xD8) continue;
+
         // FF D9 — EOI found!
         if (next == 0xD9) {
             calculated_file_size = offset_in_file + i + 2;
             return ValidateResult::AcceptVerified;
         }
+
+        // FF C0-CF (except C4, C8) — SOF markers
+        if (next >= 0xC0 && next <= 0xCF && next != 0xC4 && next != 0xC8) {
+            found_sof = true;
+        }
+
+        // FF DA — SOS marker
+        if (next == 0xDA) {
+            found_sos = true;
+        }
     }
 
     // No EOI found in this block — keep carving
-    return ValidateResult::AcceptStructure;
+    // Return AcceptStructure if we found key markers, AcceptHeader otherwise
+    if (found_sof || found_sos) {
+        return ValidateResult::AcceptStructure;
+    }
+    return ValidateResult::AcceptHeader;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor JPEG_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor JPEG_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"jpg",
     .description     = L"JPEG image",
@@ -199,13 +227,6 @@ static const FormatDescriptor JPEG_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _jpeg_registered = []() {
-    FormatRegistry::instance().register_format(JPEG_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface
 ValidateResult check_jpeg_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {

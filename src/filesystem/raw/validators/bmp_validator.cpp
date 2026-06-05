@@ -78,8 +78,9 @@ ValidateResult check_bmp_header_impl(const uint8_t* data, size_t length, uint64_
     return ValidateResult::AcceptVerified;
 }
 
-// Auto-registration with FormatRegistry
-static const FormatDescriptor BMP_DESCRIPTOR = {
+} // anonymous namespace
+
+const FormatDescriptor BMP_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"bmp",
     .description     = L"BMP bitmap image",
@@ -91,13 +92,6 @@ static const FormatDescriptor BMP_DESCRIPTOR = {
     .file_check      = nullptr,
     .enabled_by_default = true,
 };
-
-static bool _bmp_registered = []() {
-    FormatRegistry::instance().register_format(BMP_DESCRIPTOR);
-    return true;
-}();
-
-} // anonymous namespace
 
 // Public interface (for direct use by tests or legacy callers)
 ValidateResult check_bmp_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
