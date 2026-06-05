@@ -64,18 +64,20 @@ ValidateResult check_flac_header_impl(const uint8_t* data, size_t length, uint64
     if (block_length != 34) return ValidateResult::Reject;
 
     // Validate STREAMINFO fields
-    // Minimum block size (bytes 8-9): must be >= 16
+    // STREAMINFO data starts at offset 8 (after fLaC signature + block header)
+    // bytes 0-1 (data[8-9]): min block size (samples)
     uint16_t min_block_size = read_be16(data + 8);
     if (min_block_size < 16) return ValidateResult::Reject;
 
-    // Maximum block size (bytes 10-11): must be >= min_block_size
+    // bytes 2-3 (data[10-11]): max block size (samples)
     uint16_t max_block_size = read_be16(data + 10);
     if (max_block_size < min_block_size) return ValidateResult::Reject;
 
-    // Sample rate (bits 12-15): 20-bit sample rate at bits 12:4 to 14:3
-    // Actually: bytes 12-15 contain: sample_rate (20 bits), channels (3 bits), bits_per_sample (5 bits), total_samples_upper (4 bits)
-    // Sample rate is in the upper 20 bits of bytes 12-14 (bits 31:12 of the 32-bit word)
-    uint32_t sample_rate_fields = read_be32(data + 12);
+    // bytes 4-6 (data[12-14]): min frame size (24 bits) - skip validation
+    // bytes 7-9 (data[15-17]): max frame size (24 bits) - skip validation
+
+    // bytes 10-13 (data[18-21]): sample_rate (20 bits), channels-1 (3 bits), bps-1 (5 bits), total_samples_upper (4 bits)
+    uint32_t sample_rate_fields = read_be32(data + 18);
     uint32_t sample_rate = (sample_rate_fields >> 12) & 0xFFFFF;  // 20 bits
 
     // Sample rate must be valid (non-zero, reasonable range)

@@ -594,6 +594,7 @@ int main(int argc, char** argv) {
             case CorruptionLevel::None:    cli_status = L"OK"; break;
             case CorruptionLevel::Minor:   cli_status = L"Warning"; break;
             case CorruptionLevel::Moderate: cli_status = L"Damaged"; break;
+            case CorruptionLevel::Major:   cli_status = L"Unverified"; break;
             case CorruptionLevel::Severe:  cli_status = L"Corrupted"; break;
             }
             std::wcout << cli_status;

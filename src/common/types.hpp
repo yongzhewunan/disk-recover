@@ -50,9 +50,15 @@ struct DiskExtent {
 enum class CorruptionLevel : uint8_t {
     None = 0,       // File appears intact (header + footer + high confidence)
     Minor = 1,      // Missing footer or partial match, but header validated
-    Moderate = 2,   // Missing header validation, or low confidence match
-    Severe = 3      // Read errors, failed merge, or very low confidence
+    Moderate = 2,   // Container parsed but incomplete (AcceptContainer without footer)
+    Major = 3,      // Only magic matched, no structure validation (AcceptHeader)
+    Severe = 4      // Read errors, failed merge, or very low confidence
 };
+
+// Minimum confidence threshold for file recovery.
+// Files below this threshold are very likely false positives.
+// AcceptHeader = 25, AcceptStructure = 50, AcceptContainer = 75, AcceptVerified = 100
+constexpr uint8_t MIN_RECOVERY_CONFIDENCE = 50;
 
 struct RecoverableFile {
     uint64_t db_id = 0;  // Database row ID for efficient pagination

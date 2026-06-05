@@ -113,11 +113,12 @@ ValidateResult check_bmff_video_header_impl(const uint8_t* data, size_t length, 
     }
 
     // Unknown brand — check for moov box (indicates valid MP4 container)
+    // Unknown brand without moov is likely a false positive
     if (!brand_entry) {
         if (has_moov_box(data, length, ftyp_pos, box_size)) {
             return ValidateResult::AcceptContainer;
         }
-        return ValidateResult::AcceptHeader;
+        return ValidateResult::Reject;  // Unknown brand without moov → reject
     }
 
     return ValidateResult::Reject;
@@ -154,9 +155,27 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
 
     size_t pos = 0;
     uint64_t total_size = 0;
+    int valid_boxes = 0;
+
+    // Known BMFF box types for validation
+    static const char* known_types[] = {
+        "ftyp", "moov", "mdat", "meta", "free", "skip", "udta",
+        "sinf", "schi", "mvhd", "tkhd", "stbl", "dinf", "smhd",
+        "vmhd", "hmhd", "nmhd", "ilst", "uuid"
+    };
 
     while (pos + 8 <= length) {
         uint32_t box_size = read_be32(data + pos);
+
+        // Check if box type is a known BMFF box
+        const uint8_t* box_type = data + pos + 4;
+        bool is_known_box = false;
+        for (auto kt : known_types) {
+            if (memcmp(box_type, kt, 4) == 0) {
+                is_known_box = true;
+                break;
+            }
+        }
 
         // Check for extended size (box_size == 1)
         if (box_size == 1) {
@@ -167,20 +186,22 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
             // If the extended size exceeds our data, we have our answer
             if (ext_size > length - pos) {
                 calculated_file_size = total_size;
-                return ValidateResult::AcceptVerified;
+                return valid_boxes >= 2 ? ValidateResult::AcceptVerified : ValidateResult::AcceptContainer;
             }
+            if (is_known_box) ++valid_boxes;
             pos += static_cast<size_t>(ext_size);
         } else if (box_size == 0) {
             // Box extends to end of file — total size is unknown from header alone
             calculated_file_size = 0;  // Unknown, extends to EOF
-            return ValidateResult::AcceptVerified;
+            return valid_boxes >= 2 ? ValidateResult::AcceptVerified : ValidateResult::AcceptContainer;
         } else if (box_size >= 8) {
             total_size = pos + box_size;
             // If this box extends past our data, we have our answer
             if (pos + box_size > length) {
                 calculated_file_size = total_size;
-                return ValidateResult::AcceptVerified;
+                return valid_boxes >= 2 ? ValidateResult::AcceptVerified : ValidateResult::AcceptContainer;
             }
+            if (is_known_box) ++valid_boxes;
             pos += box_size;
         } else {
             // Invalid box size (< 8) — stop walking
@@ -193,7 +214,8 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
         calculated_file_size = total_size;
     }
 
-    return ValidateResult::AcceptVerified;
+    // Require at least 2 known box types for AcceptVerified
+    return valid_boxes >= 2 ? ValidateResult::AcceptVerified : ValidateResult::AcceptContainer;
 }
 
 } // anonymous namespace
@@ -201,8 +223,8 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
 const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"heic",
-    .description     = L"HEIC/AVIF (ISO BMFF Image)",
-    .min_filesize    = 12,
+    .description     = L"HEIC-AVIF (ISO BMFF Image)",
+    .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
     .signature       = {FTYP_MAGIC, 4, 4},
     .header_check    = check_bmff_image_header_impl,
@@ -214,8 +236,8 @@ const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
 const FormatDescriptor BMFF_VIDEO_DESCRIPTOR = {
     .file_type       = FileType::Video,
     .extension       = L"mp4",
-    .description     = L"MP4/MOV (ISO BMFF Video)",
-    .min_filesize    = 12,
+    .description     = L"MP4-MOV (ISO BMFF Video)",
+    .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
     .signature       = {FTYP_MAGIC, 4, 4},
     .header_check    = check_bmff_video_header_impl,
@@ -228,7 +250,7 @@ const FormatDescriptor BMFF_AUDIO_DESCRIPTOR = {
     .file_type       = FileType::Audio,
     .extension       = L"m4a",
     .description     = L"M4A (ISO BMFF Audio)",
-    .min_filesize    = 12,
+    .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
     .signature       = {FTYP_MAGIC, 4, 4},
     .header_check    = check_bmff_audio_header_impl,

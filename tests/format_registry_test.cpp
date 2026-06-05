@@ -193,14 +193,25 @@ TEST(FormatRegistryTest, MatchFlacHeader) {
     // fLaC + STREAMINFO metadata block header
     uint8_t data[] = {
         0x66, 0x4C, 0x61, 0x43,  // "fLaC"
-        0x00,                     // Block type: STREAMINFO (0), not last
+        0x80,                     // Block type: STREAMINFO (0), LAST block flag set
         0x00, 0x00, 0x22,         // Block size: 34
-        // 34 bytes of STREAMINFO data (zeros for simplicity)
+        // STREAMINFO block (34 bytes) with valid fields:
+        // bytes 0-1: min block size: 16
+        0x00, 0x10,
+        // bytes 2-3: max block size: 4096
+        0x10, 0x00,
+        // bytes 4-6: min frame size: 0 (24 bits)
+        0x00, 0x00, 0x00,
+        // bytes 7-9: max frame size: 0 (24 bits)
+        0x00, 0x00, 0x00,
+        // bytes 10-13: sample_rate (20 bits): 44100, channels-1 (3 bits): 1, bps-1 (5 bits): 15
+        // (44100 << 12) | (1 << 9) | (15 << 4) = 0x0AC442F0
+        0x0A, 0xC4, 0x42, 0xF0,
+        // bytes 14-17: total samples lower 32 bits: 0
+        0x00, 0x00, 0x00, 0x00,
+        // bytes 18-33: MD5 signature: 16 bytes of zeros
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     auto result = FormatRegistry::instance().match(data, sizeof(data));
     ASSERT_TRUE(result.has_value());

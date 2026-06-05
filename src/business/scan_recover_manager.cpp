@@ -375,10 +375,25 @@ void ScanAndRecoverManager::worker_thread(Config config) {
 
         if (stop_requested_.load()) return;
 
-        // Skip only severely damaged files — others may still be partially recoverable
-        if (file.corruption_level == CorruptionLevel::Severe) {
-            LOG_FMT(L"[ScanRecover] Skipping severely damaged %s (confidence=%u)",
-                     file.file_name.c_str(), static_cast<unsigned>(file.confidence));
+        // Skip Major+ corruption: Major (AcceptHeader only) and Severe (read errors)
+        // These are very likely false positives or unrecoverable
+        if (file.corruption_level >= CorruptionLevel::Major) {
+            LOG_FMT(L"[ScanRecover] Skipping unverified/false-positive %s (corruption=%u, confidence=%u)",
+                     file.file_name.c_str(), static_cast<unsigned>(file.corruption_level),
+                     static_cast<unsigned>(file.confidence));
+            {
+                std::lock_guard lock(progress_mutex_);
+                progress_.files_found++;
+                progress_.files_failed++;
+            }
+            return;
+        }
+
+        // Skip low-confidence matches (double safeguard against false positives)
+        if (file.confidence < active_config_.min_confidence) {
+            LOG_FMT(L"[ScanRecover] Skipping low-confidence %s (confidence=%u < %u)",
+                     file.file_name.c_str(), static_cast<unsigned>(file.confidence),
+                     static_cast<unsigned>(active_config_.min_confidence));
             {
                 std::lock_guard lock(progress_mutex_);
                 progress_.files_found++;

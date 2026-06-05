@@ -299,14 +299,13 @@ static CorruptionLevel assess_corruption(ValidateResult result, bool header_ok, 
         return CorruptionLevel::None;
 
     if (result >= ValidateResult::AcceptContainer)
-        return CorruptionLevel::Minor;
-
-    if (result >= ValidateResult::AcceptStructure)
         return footer_found ? CorruptionLevel::Minor : CorruptionLevel::Moderate;
 
-    if (result == ValidateResult::AcceptHeader)
-        return CorruptionLevel::Moderate;
+    if (result >= ValidateResult::AcceptStructure)
+        return footer_found ? CorruptionLevel::Minor : CorruptionLevel::Major;
 
+    // AcceptHeader: only magic matched, no structure validation
+    // This is the lowest level match, classify as Severe to filter false positives
     return CorruptionLevel::Severe;
 }
 
@@ -524,7 +523,16 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     const uint32_t sector_size = reader.sector_size();
 
     file.file_type = desc->file_type;
-    file.file_name = std::wstring(desc->description) + L"_sector_" + std::to_wstring(start_sector)
+
+    // Sanitize description to remove invalid Windows filename characters
+    std::wstring safe_desc(desc->description);
+    const wchar_t invalid_chars[] = { L'/', L'\\', L':', L'*', L'?', L'"', L'<', L'>', L'|' };
+    for (auto& ch : safe_desc) {
+        for (wchar_t bad : invalid_chars) {
+            if (ch == bad) { ch = L'-'; break; }
+        }
+    }
+    file.file_name = safe_desc + L"_sector_" + std::to_wstring(start_sector)
                      + L"." + desc->extension;
     file.confidence = validate_result_to_confidence(match_result.result);
 
@@ -537,7 +545,8 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     uint64_t estimated_size = match_result.calculated_file_size;
 
     // ── Step 1: Apply min_filesize from FormatDescriptor ──
-    if (desc->min_filesize > 0 && estimated_size > 0 && estimated_size < desc->min_filesize) {
+    // Always apply min_filesize, even when estimated_size is 0
+    if (desc->min_filesize > 0 && (estimated_size == 0 || estimated_size < desc->min_filesize)) {
         estimated_size = desc->min_filesize;
     }
 
@@ -658,7 +667,13 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     file.file_size = file_sectors * sector_size;
     file.fragments.push_back({start_sector, file_sectors});
 
-    // ── Step 7: Assess corruption level ──
+    // ── Step 7: Reject files below format minimum size threshold ──
+    // This catches false positives that passed header check but are too small
+    if (desc->min_filesize > 0 && file.file_size < desc->min_filesize) {
+        return false;
+    }
+
+    // ── Step 8: Assess corruption level ──
     file.corruption_level = assess_corruption(match_result.result, header_ok, footer_found);
 
     return true;

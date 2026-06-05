@@ -159,9 +159,15 @@ scan_done:
         return ValidateResult::AcceptStructure;  // Valid JPEG structure but no EOI
     }
 
-    // SOI found but SOF/SOS beyond buffer - still a valid JPEG candidate
-    // The scanner will call data_check to progressively validate as it reads more
-    return ValidateResult::AcceptHeader;
+    // SOI found but SOF/SOS beyond buffer
+    // If pos > 4, we parsed at least one marker segment (like APP0/Exif)
+    // This might be a real JPEG with large header beyond buffer
+    if (pos > 4) {
+        return ValidateResult::AcceptHeader;
+    }
+    // pos stopped at 2-3 means SOI only, no subsequent markers
+    // Almost certainly a false positive - random data after FFD8FF
+    return ValidateResult::Reject;
 }
 
 // ── Phase 2: Data check (progressive EOI search) ──
@@ -219,7 +225,7 @@ const FormatDescriptor JPEG_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"jpg",
     .description     = L"JPEG image",
-    .min_filesize    = 64,
+    .min_filesize    = 256,  // Minimum reasonable JPEG file size
     .max_filesize    = 0,
     .signature       = {JPEG_MAGIC, 3, 0},
     .header_check    = check_jpeg_header_impl,

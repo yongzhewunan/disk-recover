@@ -72,6 +72,9 @@ public:
         uint64_t min_free_space = 2ULL * 1024 * 1024 * 1024;  // 2GB minimum
         uint32_t max_files_per_dir = 500;
 
+        // Confidence threshold - files below this are skipped as false positives
+        uint8_t min_confidence = MIN_RECOVERY_CONFIDENCE;  // default 50
+
         // HWND for PostMessage notifications (auto-pause, completion)
         HWND hwnd = nullptr;
 

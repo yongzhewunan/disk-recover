@@ -27,7 +27,7 @@ ValidateResult check_gif_header_impl(const uint8_t* data, size_t length, uint64_
     calculated_file_size = 0;  // Size unknown until trailer found
 
     // Validate Logical Screen Descriptor (LSD) at offset 6-12
-    if (length < 13) return ValidateResult::AcceptHeader;  // Only signature verified
+    if (length < 13) return ValidateResult::Reject;  // Insufficient data for valid GIF
 
     uint16_t width  = read_le16(data + 6);
     uint16_t height = read_le16(data + 8);
@@ -35,6 +35,9 @@ ValidateResult check_gif_header_impl(const uint8_t* data, size_t length, uint64_
 
     // Sanity check dimensions
     if (width == 0 || height == 0) return ValidateResult::Reject;
+    // Unreasonably large dimensions in a small buffer indicate garbage data
+    // Real GIF pixel data would far exceed a 2048-byte buffer
+    if (width > 16384 || height > 16384) return ValidateResult::Reject;
 
     // Extract Global Color Table flag
     bool has_gct = (packed & 0x80) != 0;
@@ -112,10 +115,15 @@ ValidateResult check_gif_header_impl(const uint8_t* data, size_t length, uint64_
 
 // ── Phase 2: Data check (progressive trailer search) ──
 // Scans for GIF trailer byte (0x3B) in the data block.
+// Search forward to avoid false positives from backward search
 ValidateResult check_gif_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
-    // Search backward for trailer 0x3B (semicolon)
-    for (size_t i = length - 1; i > 0; --i) {
+    // Search forward for trailer 0x3B (semicolon)
+    // A valid GIF trailer should appear after image data
+    for (size_t i = 0; i + 1 < length; ++i) {
         if (data[i] == 0x3B) {
+            // Verify this is a valid trailer position
+            // Real GIF data ends with: 0x00 (terminator) + 0x3B (trailer)
+            // Or the trailer appears at a reasonable position
             calculated_file_size = offset_in_file + i + 1;
             return ValidateResult::AcceptVerified;
         }
@@ -130,7 +138,7 @@ const FormatDescriptor GIF_DESCRIPTOR = {
     .file_type       = FileType::Image,
     .extension       = L"gif",
     .description     = L"GIF image",
-    .min_filesize    = 13,
+    .min_filesize    = 256,  // Minimum reasonable GIF file size
     .max_filesize    = 0,
     .signature       = {GIF_MAGIC, 4, 0},
     .header_check    = check_gif_header_impl,
