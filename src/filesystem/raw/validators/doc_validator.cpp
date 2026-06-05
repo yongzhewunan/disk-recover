@@ -19,8 +19,9 @@ static const uint8_t DOC_MAGIC[] = {0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0x
 //
 // Phase 2 (file_check): Walk FAT chain, find Root Entry in directory,
 //   check for specific stream names to determine extension.
-//   Set calculated_file_size from total sectors * sector_size.
-//   Returns AcceptVerified.
+//   Returns AcceptVerified if structure is valid.
+//   Note: calculated_file_size is set to 0 because the limited buffer
+//   (typically 2KB) doesn't contain enough data for accurate size calculation.
 //
 // Reference: MS-CFB (Compound File Binary Format) specification.
 // ============================================================================
@@ -91,16 +92,10 @@ ValidateResult check_doc_file_impl(const uint8_t* data, size_t length, uint64_t&
     uint32_t num_fat_sectors = read_le32(data + 44);
     uint32_t first_dir_sector_id = read_le32(data + 48);
 
-    // Calculate total sectors from file length
-    uint64_t total_sectors = 0;
-    if (length >= sector_size) {
-        total_sectors = (length - 512) / sector_size;  // Subtract 512 for header
-    }
-
-    if (total_sectors == 0) return ValidateResult::AcceptStructure;
-
-    // Set calculated_file_size from total sectors
-    calculated_file_size = 512 + uint64_t(total_sectors) * sector_size;
+    // File size cannot be determined from the limited data buffer passed to file_check.
+    // The scanner passes HEADER_SECTORS (typically 2KB) of data, not the full file.
+    // Let the scanner use default Document size estimate (1MB) via Step 4 fallback.
+    calculated_file_size = 0;
 
     // ── Walk FAT to build sector chain ──
     // FAT sector locations are in DIFAT array (header offsets 76..424, then chain)
@@ -177,11 +172,12 @@ ValidateResult check_doc_file_impl(const uint8_t* data, size_t length, uint64_t&
             size_t entry_off = doff + e * DIR_ENTRY_SIZE;
             if (entry_off + DIR_ENTRY_SIZE > length) break;
 
-            // Entry type at offset 64 (1 byte): 0=unknown, 1=storage, 2=stream, 5=root
-            uint8_t entry_type = data[entry_off + 64];
-            if (entry_type == 0) continue;  // Empty entry
+            // Object type at offset 66 (1 byte): 0=unknown, 1=storage, 2=stream, 5=root
+            // Per MS-CFB spec: Directory Entry has NameLength at offset 64, ObjectType at offset 66
+            uint8_t entry_type = data[entry_off + 66];
+            if (entry_type == 0) continue;  // Empty/unused entry
 
-            // Entry name is UTF-16LE at offset 0, name length at offset 64-2=66
+            // Entry name is UTF-16LE at offset 0, name length (bytes) at offset 64
             uint16_t name_len = read_le16(data + entry_off + 64);
             if (name_len < 4 || name_len > 64) continue;  // Too short or too long
 
