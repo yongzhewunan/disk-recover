@@ -14,4 +14,7 @@ extern const FormatDescriptor BMFF_AUDIO_DESCRIPTOR;
 ValidateResult check_bmff_header(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 ValidateResult check_bmff_file(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
 
+// Internal: atom tree walking for size calculation (used by signature_scanner_impl)
+ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size);
+
 } // namespace disk_recover

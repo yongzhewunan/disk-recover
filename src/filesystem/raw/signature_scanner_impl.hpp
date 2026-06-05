@@ -13,6 +13,7 @@
 #include "binary_reader.hpp"
 #include "format_registry.hpp"
 #include "validation.hpp"
+#include "validators/bmff_validator.hpp"
 #include "../common/logger.hpp"
 #include <algorithm>
 #include <chrono>
@@ -84,11 +85,15 @@ static uint64_t find_image_footer(FileType type, const uint8_t* data, size_t len
 }
 
 // ── Walk the top-level MP4/MOV atom tree to calculate total file size ──
+// Returns 0 if size cannot be determined (e.g., atom extends to EOF, or read error)
+// Note: This function only walks atoms within MAX_HEADER_SCAN range.
+// For files with atoms extending beyond this range, the size is estimated
+// based on atoms seen. If an atom claims size=0 (extends to EOF), returns 0.
 
 template<typename ReaderType>
 static uint64_t determine_mp4_size_impl(ReaderType& reader, uint64_t start_sector, uint32_t sector_size) {
     const uint32_t READ_SECTORS = 4;
-    const uint64_t MAX_HEADER_SCAN = 4ULL * 1024 * 1024;
+    const uint64_t MAX_HEADER_SCAN = 256ULL * 1024 * 1024;  // 256MB scan range
     const uint64_t ATOM_SANITY_LIMIT = 100ULL * 1024 * 1024 * 1024;
 
     AlignedBuffer buf(READ_SECTORS * sector_size, sector_size);
@@ -98,20 +103,22 @@ static uint64_t determine_mp4_size_impl(ReaderType& reader, uint64_t start_secto
     uint64_t buf_start = 0;
     uint64_t buf_end = 0;
     bool buf_valid = false;
+    bool hit_eof_atom = false;  // Track if we hit an atom that extends to EOF
 
     while (file_offset < MAX_HEADER_SCAN) {
         if (!buf_valid || file_offset + 8 > buf_end) {
             uint64_t read_offset = file_offset;
             uint64_t sector_num = start_sector + read_offset / sector_size;
             if (!reader.read_sectors_checked(sector_num, READ_SECTORS, buf)) {
-                return 0;
+                // Read error - return what we have so far
+                return total_size > 0 ? total_size : 0;
             }
             buf_start = (sector_num - start_sector) * sector_size;
             buf_end = buf_start + READ_SECTORS * sector_size;
             buf_valid = true;
 
             if (file_offset + 8 > buf_end) {
-                return 0;
+                return total_size > 0 ? total_size : 0;
             }
         }
 
@@ -126,37 +133,49 @@ static uint64_t determine_mp4_size_impl(ReaderType& reader, uint64_t start_secto
             if (file_offset + 16 > buf_end) {
                 uint64_t sector_num = start_sector + file_offset / sector_size;
                 if (!reader.read_sectors_checked(sector_num, READ_SECTORS, buf)) {
-                    return 0;
+                    return total_size > 0 ? total_size : 0;
                 }
                 buf_start = (sector_num - start_sector) * sector_size;
                 buf_end = buf_start + READ_SECTORS * sector_size;
                 buf_valid = true;
 
                 if (file_offset + 16 > buf_end) {
-                    return 0;
+                    return total_size > 0 ? total_size : 0;
                 }
                 hdr = buf.data() + static_cast<size_t>(file_offset - buf_start);
             }
             atom_size = read_be64(hdr + 8);
         } else if (atom_size32 == 0) {
-            return 0;
+            // Atom extends to end of file - cannot determine exact size from header
+            // Return what we have accumulated, caller will use next-header search
+            hit_eof_atom = true;
+            break;
         }
 
         if (atom_size > ATOM_SANITY_LIMIT) {
-            return 0;
+            // Sanity check failed - likely corrupted or false positive
+            return total_size > 0 ? total_size : 0;
         }
 
         uint64_t min_size = (atom_size32 == 1) ? 16 : 8;
         if (atom_size < min_size) {
-            return 0;
+            // Invalid atom size
+            return total_size > 0 ? total_size : 0;
         }
 
         total_size += atom_size;
         file_offset += atom_size;
 
         if (file_offset > MAX_HEADER_SCAN) {
+            // We've walked enough atoms - total_size is our estimate
             break;
         }
+    }
+
+    // If we hit an EOF-extending atom, we can't determine exact size
+    // Return 0 to signal caller should use next-header search
+    if (hit_eof_atom) {
+        return 0;
     }
 
     return total_size;
@@ -593,6 +612,20 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     }
 
     // ── Step 3: File check for container formats (if available) ──
+    // For BMFF formats (MP4/MOV/HEIC), we need to read from disk to walk the atom tree.
+    // The in-buffer file_check with 2KB is insufficient for BMFF atom tree walking.
+    bool is_bmff_format = ((desc->file_type == FileType::Video || desc->file_type == FileType::Image) &&
+                           desc->file_check == check_bmff_file_impl);
+
+    if (is_bmff_format && estimated_size == 0) {
+        // Use on-disk atom tree walking for BMFF files
+        uint64_t atom_size = determine_mp4_size_impl(reader, start_sector, sector_size);
+        if (atom_size > 0) {
+            estimated_size = atom_size;
+            footer_found = true;  // Atom tree fully walked = size determined
+        }
+    }
+
     if (estimated_size == 0 && desc->file_check != nullptr && header_ok) {
         uint64_t calc_size = 0;
         ValidateResult file_result = desc->file_check(

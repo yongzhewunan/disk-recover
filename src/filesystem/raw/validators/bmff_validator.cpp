@@ -147,9 +147,9 @@ ValidateResult check_bmff_audio_header_impl(const uint8_t* data, size_t length, 
     return ValidateResult::AcceptContainer;
 }
 
-// ── Phase 3: File check (atom tree walking for size calculation) ──
-// Walks top-level boxes to determine total file size.
-// Shared by all BMFF descriptors.
+} // anonymous namespace
+
+// Phase 3: File check (atom tree walking for size calculation) — exported for signature_scanner_impl
 ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     if (length < 8) return ValidateResult::Reject;
 
@@ -217,8 +217,6 @@ ValidateResult check_bmff_file_impl(const uint8_t* data, size_t length, uint64_t
     // Require at least 2 known box types for AcceptVerified
     return valid_boxes >= 2 ? ValidateResult::AcceptVerified : ValidateResult::AcceptContainer;
 }
-
-} // anonymous namespace
 
 const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
     .file_type       = FileType::Image,
