@@ -1,5 +1,6 @@
 add_subdirectory(common)
 add_subdirectory(disk-io)
+add_subdirectory(external)
 add_subdirectory(filesystem)
 add_subdirectory(business)
 add_subdirectory(ui)

@@ -20,12 +20,19 @@ set(VALIDATOR_SOURCES
     validators/flac_validator.cpp
 )
 
+# TestDisk adapter sources
+set(TESTDISK_ADAPTER_SOURCES
+    testdisk_adapter.cpp
+    testdisk_validators.cpp
+)
+
 add_library(disk_recover_filesystem_raw STATIC
     format_registry.cpp
     validator_linkage.cpp
     file_signatures.cpp
     signature_scanner.cpp
     ${VALIDATOR_SOURCES}
+    ${TESTDISK_ADAPTER_SOURCES}
 )
 
 # Prevent MSVC linker from stripping .obj files from the static library
@@ -35,4 +42,4 @@ if(MSVC)
 endif()
 
 target_include_directories(disk_recover_filesystem_raw PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(disk_recover_filesystem_raw PUBLIC disk_recover_common disk_recover_disk_io)
+target_link_libraries(disk_recover_filesystem_raw PUBLIC disk_recover_common disk_recover_disk_io disk_recover_testdisk)
