@@ -115,21 +115,124 @@ ValidateResult check_gif_header_impl(const uint8_t* data, size_t length, uint64_
 
 // ── Phase 2: Data check (progressive trailer search) ──
 // Scans for GIF trailer byte (0x3B) in the data block.
-// Search forward to avoid false positives from backward search
+// Validates context: 0x3B must follow a sub-block terminator (0x00) or be at block start.
 ValidateResult check_gif_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
     // Search forward for trailer 0x3B (semicolon)
-    // A valid GIF trailer should appear after image data
-    for (size_t i = 0; i + 1 < length; ++i) {
+    // Real GIF data ends with: 0x00 (terminator) + 0x3B (trailer)
+    for (size_t i = 0; i < length; ++i) {
         if (data[i] == 0x3B) {
-            // Verify this is a valid trailer position
-            // Real GIF data ends with: 0x00 (terminator) + 0x3B (trailer)
-            // Or the trailer appears at a reasonable position
-            calculated_file_size = offset_in_file + i + 1;
-            return ValidateResult::AcceptVerified;
+            // Validate trailer context: must follow 0x00 (sub-block terminator)
+            // or be at the start of this block (assume previous block ended correctly)
+            bool valid_context = false;
+            if (i == 0) {
+                valid_context = true;  // Block start, assume previous block ended correctly
+            } else if (data[i - 1] == 0x00) {
+                valid_context = true;  // Follows sub-block terminator — correct
+            }
+
+            if (valid_context) {
+                calculated_file_size = offset_in_file + i + 1;
+                return ValidateResult::AcceptVerified;
+            }
+            // Otherwise, this 0x3B is inside sub-block data — keep searching
         }
     }
 
     return ValidateResult::AcceptStructure;  // Keep carving
+}
+
+// ── Phase 3: File check (full file re-validation) ──
+// Re-traverses entire GIF file from disk, verifying signature+LSD+GCT,
+// walking all image descriptors and extension blocks, finding trailer.
+ValidateResult check_gif_file_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
+    if (length < 13) return ValidateResult::Reject;
+
+    // Re-verify GIF signature
+    if (data[0] != 'G' || data[1] != 'I' || data[2] != 'F' || data[3] != '8')
+        return ValidateResult::Reject;
+
+    bool is_gif89a = (data[4] == '9' && data[5] == 'a');
+    bool is_gif87a = (data[4] == '7' && data[5] == 'a');
+    if (!is_gif87a && !is_gif89a) return ValidateResult::Reject;
+
+    // Re-validate Logical Screen Descriptor
+    uint16_t width  = read_le16(data + 6);
+    uint16_t height = read_le16(data + 8);
+    if (width == 0 || height == 0) return ValidateResult::Reject;
+    if (width > 16384 || height > 16384) return ValidateResult::Reject;
+
+    uint8_t packed = data[10];
+    bool has_gct = (packed & 0x80) != 0;
+    uint8_t gct_bits = (packed & 0x07) + 1;
+    size_t gct_size = 0;
+    if (has_gct) {
+        gct_size = 3 * (1 << gct_bits);
+    }
+
+    // Walk the entire block stream
+    size_t pos = 13 + gct_size;
+    bool has_image = false;
+    const size_t MAX_BLOCKS = 1000000;  // Safety limit
+
+    for (size_t block_count = 0; block_count < MAX_BLOCKS && pos < length; ++block_count) {
+        uint8_t block_type = data[pos];
+
+        // Trailer (0x3B) — end of GIF
+        if (block_type == 0x3B) {
+            calculated_file_size = pos + 1;
+            if (!has_image) return ValidateResult::Reject;  // Must have at least one image
+            return ValidateResult::AcceptVerified;
+        }
+
+        // Image Descriptor (0x2C)
+        if (block_type == 0x2C) {
+            has_image = true;
+            if (pos + 10 > length) break;  // Truncated image descriptor
+            pos += 9;
+
+            // Local Color Table
+            uint8_t img_packed = data[pos++];
+            bool has_lct = (img_packed & 0x80) != 0;
+            if (has_lct) {
+                uint8_t lct_bits = (img_packed & 0x07) + 1;
+                pos += 3 * (1 << lct_bits);
+            }
+
+            // LZW Minimum Code Size
+            if (pos >= length) break;
+            pos++;
+
+            // Image Data Sub-blocks
+            while (pos < length) {
+                uint8_t sub_block_size = data[pos++];
+                if (sub_block_size == 0) break;
+                pos += sub_block_size;
+            }
+            continue;
+        }
+
+        // Extension Block (0x21)
+        if (block_type == 0x21) {
+            if (pos + 2 > length) break;
+            pos++;
+            uint8_t label = data[pos++];
+
+            // Extension sub-blocks
+            while (pos < length) {
+                uint8_t sub_block_size = data[pos++];
+                if (sub_block_size == 0) break;
+                pos += sub_block_size;
+            }
+            continue;
+        }
+
+        // Unknown block — skip
+        pos++;
+    }
+
+    // No trailer found or file truncated
+    if (has_image) return ValidateResult::AcceptStructure;
+    return ValidateResult::Reject;
 }
 
 } // anonymous namespace
@@ -143,7 +246,7 @@ const FormatDescriptor GIF_DESCRIPTOR = {
     .signature       = {GIF_MAGIC, 4, 0},
     .header_check    = check_gif_header_impl,
     .data_check      = check_gif_data_impl,
-    .file_check      = nullptr,
+    .file_check      = check_gif_file_impl,
     .enabled_by_default = true,
 };
 
@@ -154,6 +257,10 @@ ValidateResult check_gif_header(const uint8_t* data, size_t length, uint64_t& ca
 
 ValidateResult check_gif_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
     return check_gif_data_impl(data, length, offset_in_file, calculated_file_size);
+}
+
+ValidateResult check_gif_file(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
+    return check_gif_file_impl(data, length, calculated_file_size);
 }
 
 // Backward-compatible wrapper for old validators.hpp interface

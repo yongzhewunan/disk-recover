@@ -545,10 +545,12 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     // This is the most accurate source — comes from format-specific header parsing
     uint64_t estimated_size = match_result.calculated_file_size;
 
-    // ── Step 1: Apply min_filesize from FormatDescriptor ──
-    // Always apply min_filesize, even when estimated_size is 0
-    if (desc->min_filesize > 0 && (estimated_size == 0 || estimated_size < desc->min_filesize)) {
-        estimated_size = desc->min_filesize;
+    // ── Step 1: Validate header-declared size against min_filesize ──
+    // min_filesize is for validation only, NOT for size estimation.
+    // If header_check returned a non-zero size below min_filesize, the header is corrupted.
+    // When calculated_file_size=0, we keep estimated_size=0 to let Step 2/3/4 execute properly.
+    if (desc->min_filesize > 0 && estimated_size > 0 && estimated_size < desc->min_filesize) {
+        return false;  // Header-declared size below minimum → false positive
     }
 
     // ── Step 2: Progressive carving using data_check (if available) ──
@@ -685,7 +687,8 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             }
 
             // file_check may refine the file size (e.g., find exact IEND/EOI position)
-            if (calc_size > 0 && calc_size < estimated_size) {
+            // Allow both shrinking AND growing — HEIC file_check computes true size from atom tree
+            if (calc_size > 0 && calc_size != estimated_size) {
                 estimated_size = calc_size;
                 file_sectors = (estimated_size + sector_size - 1) / sector_size;
                 file.file_size = file_sectors * sector_size;
