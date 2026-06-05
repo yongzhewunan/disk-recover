@@ -4,6 +4,7 @@ set(TESTDISK_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/testdisk/filegen.c
     ${CMAKE_CURRENT_SOURCE_DIR}/testdisk/memmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/testdisk/setdate.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/testdisk/td_stubs.c
 )
 
 # Each validator is compiled as a separate source with SINGLE_FORMAT_xxx defined

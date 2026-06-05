@@ -13,13 +13,17 @@
 #include "binary_reader.hpp"
 #include "format_registry.hpp"
 #include "validation.hpp"
-#include "validators/bmff_validator.hpp"
 #include "../common/logger.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 
 namespace disk_recover {
+
+// Dispatch context for TestDisk validator wrappers — set before calling
+// data_check/file_check so the wrapper knows which validator to dispatch to.
+// Definition is in testdisk_adapter.cpp; declared extern in testdisk_adapter.hpp.
+extern const wchar_t* g_td_dispatch_ext;
 
 // ── Format-aware gap thresholds for video fragment merging ──
 static constexpr uint64_t VIDEO_MERGE_GAP_MP4  = 4ULL * 1024 * 1024;   // 4MB
@@ -321,11 +325,14 @@ static CorruptionLevel assess_corruption(ValidateResult result, bool header_ok, 
         return footer_found ? CorruptionLevel::Minor : CorruptionLevel::Moderate;
 
     if (result >= ValidateResult::AcceptStructure)
-        return footer_found ? CorruptionLevel::Minor : CorruptionLevel::Major;
+        // AcceptStructure means internal structure validated (e.g., JPEG markers, PNG chunks)
+        // This is significantly better than AcceptHeader (magic only)
+        // Even without footer, these files have recoverable content
+        return CorruptionLevel::Minor;
 
     // AcceptHeader: only magic matched, no structure validation
-    // This is the lowest level match, classify as Severe to filter false positives
-    return CorruptionLevel::Severe;
+    // This is the lowest level match, likely false positive, but still recoverable
+    return CorruptionLevel::Moderate;
 }
 
 // ── Format-aware gap threshold for video merging ──
@@ -556,6 +563,9 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
                      + L"." + desc->extension;
     file.confidence = validate_result_to_confidence(match_result.result);
 
+    // Track the best validation result across all stages
+    ValidateResult best_result = match_result.result;
+
     const uint32_t HEADER_SECTORS = 4;
     AlignedBuffer headerBuf(HEADER_SECTORS * sector_size, sector_size);
     bool header_ok = reader.read_sectors_checked(start_sector, HEADER_SECTORS, headerBuf);
@@ -592,11 +602,25 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             if (!reader.read_sectors_checked(probe, to_read, probeBuf)) break;
 
             uint64_t calc_size = 0;
+            g_td_dispatch_ext = desc->extension;
             ValidateResult data_result = desc->data_check(
                 probeBuf.data(), to_read * sector_size,
                 (probe - start_sector) * sector_size, calc_size);
+            g_td_dispatch_ext = nullptr;
 
-            if (calc_size > 0) {
+            // Update best_result even if calc_size is 0
+            // data_check may return AcceptStructure/AcceptContainer without finding size
+            if (data_result > best_result) {
+                best_result = data_result;
+            }
+
+            // Only accept calculated_file_size as final size when data_check confirms completion.
+            // For formats like JPG, data_check returns intermediate parsing positions (DC_CONTINUE)
+            // with small calculated_file_size values (e.g., 2 bytes to skip SOI marker).
+            // These intermediate values track parsing progress, NOT the final file size.
+            // We should only use calculated_file_size when data_check returns DC_STOP (AcceptVerified),
+            // indicating it has found the actual file boundary (EOI for JPG, IEND for PNG).
+            if (data_result >= ValidateResult::AcceptVerified && calc_size > 0) {
                 estimated_size = calc_size;
                 footer_found = true;
                 break;
@@ -605,34 +629,32 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             if (data_result == ValidateResult::Reject) break;
         }
 
-        // If data_check didn't find size, use default estimate
+        // If data_check didn't find final size (DC_STOP), use default estimate
+        // Note: formats like JPG with progressive parsing will hit this path,
+        // since they scan through data until EOI without returning DC_STOP early.
         if (estimated_size == 0) {
             estimated_size = desc->file_type == FileType::Image ? 500 * 1024 : 10 * 1024 * 1024;
         }
     }
 
     // ── Step 3: File check for container formats (if available) ──
-    // For BMFF formats (MP4/MOV/HEIC), we need to read from disk to walk the atom tree.
-    // The in-buffer file_check with 2KB is insufficient for BMFF atom tree walking.
-    bool is_bmff_format = ((desc->file_type == FileType::Video || desc->file_type == FileType::Image) &&
-                           desc->file_check == check_bmff_file_impl);
-
-    if (is_bmff_format && estimated_size == 0) {
-        // Use on-disk atom tree walking for BMFF files
-        uint64_t atom_size = determine_mp4_size_impl(reader, start_sector, sector_size);
-        if (atom_size > 0) {
-            estimated_size = atom_size;
-            footer_found = true;  // Atom tree fully walked = size determined
-        }
-    }
+    // For formats with data_check that can progressively determine size
+    // (e.g., MOV with data_check_mov, AVI with data_check_avi),
+    // the data_check path handles size calculation.
+    // For formats without data_check, we try file_check with header data.
 
     if (estimated_size == 0 && desc->file_check != nullptr && header_ok) {
         uint64_t calc_size = 0;
+        g_td_dispatch_ext = desc->extension;
         ValidateResult file_result = desc->file_check(
             headerBuf.data(), HEADER_SECTORS * sector_size, calc_size);
+        g_td_dispatch_ext = nullptr;
         if (calc_size > 0) {
             estimated_size = calc_size;
             footer_found = (file_result >= ValidateResult::AcceptVerified);
+            if (file_result > best_result) {
+                best_result = file_result;
+            }
         }
     }
 
@@ -712,8 +734,10 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
         AlignedBuffer fileBuf(file_sectors * sector_size, sector_size);
         if (reader.read_sectors_checked(start_sector, static_cast<uint32_t>(file_sectors), fileBuf)) {
             uint64_t calc_size = estimated_size;
+            g_td_dispatch_ext = desc->extension;
             ValidateResult file_result = desc->file_check(
                 fileBuf.data(), file_sectors * sector_size, calc_size);
+            g_td_dispatch_ext = nullptr;
 
             if (file_result == ValidateResult::Reject) {
                 return false;  // file_check rejects -> discard this candidate
@@ -729,7 +753,8 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
             }
 
             // Upgrade validation result if file_check confirms deeper
-            if (file_result > match_result.result) {
+            if (file_result > best_result) {
+                best_result = file_result;
                 file.confidence = validate_result_to_confidence(file_result);
             }
 
@@ -747,7 +772,8 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     }
 
     // ── Step 8: Assess corruption level ──
-    file.corruption_level = assess_corruption(match_result.result, header_ok, footer_found);
+    // Use the best validation result from all stages, not just initial header check
+    file.corruption_level = assess_corruption(best_result, header_ok, footer_found);
 
     return true;
 }

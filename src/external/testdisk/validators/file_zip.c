@@ -1357,13 +1357,26 @@ static int header_check_zip(const unsigned char *buffer, const unsigned int buff
 {
   const zip_file_entry_t *file=(const zip_file_entry_t *)&buffer[4];
   const unsigned int len=le16(file->filename_length);
+  /* TEMP DEBUG: print struct layout */
+  printf("[TD-ZIP] sizeof=%zu off_ver=%zu off_comp=%zu off_time=%zu off_date=%zu off_crc=%zu off_csz=%zu off_usz=%zu off_fn=%zu off_ex=%zu\n",
+         sizeof(zip_file_entry_t),
+         ((const char*)&file->version - (const char*)file),
+         ((const char*)&file->compression - (const char*)file),
+         ((const char*)&file->last_mod_time - (const char*)file),
+         ((const char*)&file->last_mod_date - (const char*)file),
+         ((const char*)&file->crc32 - (const char*)file),
+         ((const char*)&file->compressed_size - (const char*)file),
+         ((const char*)&file->uncompressed_size - (const char*)file),
+         ((const char*)&file->filename_length - (const char*)file),
+         ((const char*)&file->extra_length - (const char*)file));
+  printf("[TD-ZIP] len=%u version=%u file_stat=%p\n", len, le16(file->version), (void*)file_recovery->file_stat);
 #ifdef DEBUG_ZIP
   log_trace("header_check_zip\n");
 #endif
   if(len==0 || len > 4096)
-    return 0;
+  { printf("[TD-ZIP] REJECT: len=%u\n", len); return 0; }
   if(le16(file->version) < 10)
-    return 0;
+  { printf("[TD-ZIP] REJECT: version=%u < 10\n", le16(file->version)); return 0; }
 #if !defined(SINGLE_FORMAT_zip)
   if(file_recovery->file_stat!=NULL &&
       file_recovery->file_stat->file_hint==&file_hint_doc)

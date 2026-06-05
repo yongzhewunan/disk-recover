@@ -34,6 +34,12 @@ extern "C" {
 
 namespace disk_recover {
 
+// Dispatch context for TestDisk validator wrappers — set by
+// FormatRegistry::match() and SignatureScanner before calling
+// header_check/data_check/file_check, so the wrapper knows
+// which validator to dispatch to.
+extern const wchar_t* g_td_dispatch_ext;
+
 /**
  * @brief Adapter class that wraps TestDisk validators for disk-recover.
  *
@@ -45,8 +51,9 @@ public:
     /**
      * @brief Construct a validator from a TestDisk file_hint_t.
      * @param hint Pointer to TestDisk's file_hint_t structure.
+     * @param file_stat Pointer to the per-hint file_stat_t used during registration.
      */
-    explicit TestDiskValidator(const file_hint_t* hint);
+    explicit TestDiskValidator(const file_hint_t* hint, file_stat_t* file_stat);
 
     /**
      * @brief Destructor.
@@ -64,8 +71,9 @@ public:
     /**
      * @brief Perform header check validation.
      *
-     * This wraps TestDisk's header_check function, mapping the result
-     * to disk-recover's ValidateResult enum.
+     * Walks file_check_plist to find signature patterns belonging to
+     * this validator (by matching file_stat), then calls TestDisk's
+     * header_check callback.
      *
      * @param data Buffer containing file header data.
      * @param length Length of the buffer.
@@ -78,8 +86,8 @@ public:
     /**
      * @brief Perform data check validation (progressive carving).
      *
-     * This wraps TestDisk's data_check function for incremental validation
-     * during file carving.
+     * Calls TestDisk's data_check function if available, mapping
+     * data_check_t to ValidateResult.
      *
      * @param data Buffer containing file data block.
      * @param length Length of the buffer.
@@ -94,7 +102,9 @@ public:
     /**
      * @brief Perform final file check validation.
      *
-     * This wraps TestDisk's file_check function for complete file validation.
+     * Creates a temporary file from the in-memory buffer, sets
+     * recovery_ctx_->handle to its FILE*, then calls TestDisk's
+     * file_check callback.
      *
      * @param data Buffer containing complete file data.
      * @param length Length of the buffer.
@@ -149,7 +159,7 @@ public:
 private:
     const file_hint_t* hint_;          ///< Pointer to TestDisk's file hint
     file_recovery_t* recovery_ctx_;    ///< TestDisk's recovery context
-    file_stat_t* file_stat_;           ///< TestDisk's file statistics
+    file_stat_t* file_stat_;           ///< Per-hint file statistics (for plist matching)
 
     // Cached values
     std::wstring extension_;
@@ -188,27 +198,9 @@ private:
  * @brief Factory function to create a validator for a specific format.
  *
  * @param hint Pointer to TestDisk's file_hint_t structure.
+ * @param file_stat Pointer to per-hint file_stat_t from registration.
  * @return Unique pointer to a TestDiskValidator instance.
  */
-std::unique_ptr<TestDiskValidator> create_validator(const file_hint_t* hint);
-
-/**
- * @brief Macro to declare a TestDisk validator.
- *
- * Usage: DECLARE_TESTDISK_VALIDATOR(jpg)
- */
-#define DECLARE_TESTDISK_VALIDATOR(name) \
-    extern const file_hint_t file_hint_##name; \
-    std::unique_ptr<TestDiskValidator> create_##name##_validator()
-
-/**
- * @brief Macro to define a TestDisk validator factory function.
- *
- * Usage: DEFINE_TESTDISK_VALIDATOR(jpg)
- */
-#define DEFINE_TESTDISK_VALIDATOR(name) \
-    std::unique_ptr<TestDiskValidator> create_##name##_validator() { \
-        return create_validator(&file_hint_##name); \
-    }
+std::unique_ptr<TestDiskValidator> create_validator(const file_hint_t* hint, file_stat_t* file_stat);
 
 } // namespace disk_recover

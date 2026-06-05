@@ -1,23 +1,6 @@
-# Validator sources
+# Only legacy validator without a TestDisk equivalent
 set(VALIDATOR_SOURCES
-    validators/bmp_validator.cpp
-    validators/jpeg_validator.cpp
-    validators/png_validator.cpp
-    validators/gif_validator.cpp
-    validators/tiff_validator.cpp
-    validators/bmff_validator.cpp
-    validators/riff_validator.cpp
-    validators/ebml_validator.cpp
     validators/ts_validator.cpp
-    validators/wmv_validator.cpp
-    validators/flv_validator.cpp
-    validators/pdf_validator.cpp
-    validators/zip_validator.cpp
-    validators/sevenz_validator.cpp
-    validators/rar_validator.cpp
-    validators/doc_validator.cpp
-    validators/mp3_validator.cpp
-    validators/flac_validator.cpp
 )
 
 # TestDisk adapter sources
@@ -29,7 +12,6 @@ set(TESTDISK_ADAPTER_SOURCES
 add_library(disk_recover_filesystem_raw STATIC
     format_registry.cpp
     validator_linkage.cpp
-    file_signatures.cpp
     signature_scanner.cpp
     ${VALIDATOR_SOURCES}
     ${TESTDISK_ADAPTER_SOURCES}

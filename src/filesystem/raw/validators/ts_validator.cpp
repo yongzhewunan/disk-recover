@@ -1,7 +1,6 @@
 #include "ts_validator.hpp"
 #include "binary_reader.hpp"
 #include "format_registry.hpp"
-#include "../file_signatures.hpp"  // For backward-compatible wrapper
 
 #include <algorithm>
 
@@ -289,46 +288,6 @@ ValidateResult check_ts_header(const uint8_t* data, size_t length, uint64_t& cal
 
 ValidateResult check_ts_data(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
     return check_ts_data_impl(data, length, offset_in_file, calculated_file_size);
-}
-
-// ── Backward-compatible wrapper for old FileSignatures interface ──
-// Converts ValidateResult + FormatDescriptor to old MatchResult.
-namespace {
-
-// Helper to detect M2TS vs MTS from data for extension selection
-const wchar_t* ts_format_extension(const uint8_t* data, size_t length) {
-    if (length >= 384 && data[4] == 0x47 && data[196] == 0x47) {
-        return L"m2ts";
-    }
-    return L"mts";
-}
-
-const wchar_t* ts_format_description(const uint8_t* data, size_t length) {
-    if (length >= 384 && data[4] == 0x47 && data[196] == 0x47) {
-        return L"Blu-ray M2TS";
-    }
-    return L"MPEG-TS/AVCHD";
-}
-
-} // anonymous namespace
-
-std::optional<MatchResult> validate_ts(const uint8_t* data, size_t length) {
-    uint64_t calculated_file_size = 0;
-    ValidateResult result = check_ts_header_impl(data, length, calculated_file_size);
-    if (result == ValidateResult::Reject) return std::nullopt;
-
-    const wchar_t* ext = ts_format_extension(data, length);
-    const wchar_t* desc = ts_format_description(data, length);
-
-    MatchFlags flags = MatchFlags::HasHeader;
-    if (result >= ValidateResult::AcceptStructure) flags = flags | MatchFlags::DeepValidated;
-
-    return MatchResult{
-        {FileType::Video, ext, desc},
-        validate_result_to_confidence(result),
-        flags,
-        0  // verified_file_size: no size in MPEG-TS structure
-    };
 }
 
 } // namespace disk_recover

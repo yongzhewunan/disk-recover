@@ -9,6 +9,14 @@
 
 namespace disk_recover {
 
+// Thread-local dispatch context — set by FormatRegistry::match() before
+// calling header_check, so per-format dispatch wrappers can identify
+// which FormatDescriptor (and thus which validator) is being invoked.
+// This is needed because FormatDescriptor uses bare function pointers
+// with no user-data parameter.
+// Definition is in testdisk_adapter.cpp; declared extern in testdisk_adapter.hpp.
+extern const wchar_t* g_td_dispatch_ext;
+
 FormatRegistry& FormatRegistry::instance() {
     static FormatRegistry registry;
     // Explicitly register all format descriptors on first call.
@@ -87,8 +95,11 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
 
         // Run header_check
         if (fmt->header_check) {
+            // Set dispatch context so the wrapper can identify the format
+            g_td_dispatch_ext = fmt->extension;
             uint64_t calc_size = 0;
             ValidateResult result = fmt->header_check(data, length, calc_size);
+            g_td_dispatch_ext = nullptr;
             if (result != ValidateResult::Reject) {
                 // Keep the match with deepest validation
                 if (result > best_match.result) {
@@ -121,8 +132,11 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
 
         // Run header_check
         if (fmt->header_check) {
+            // Set dispatch context so the wrapper can identify the format
+            g_td_dispatch_ext = fmt->extension;
             uint64_t calc_size = 0;
             ValidateResult result = fmt->header_check(data, length, calc_size);
+            g_td_dispatch_ext = nullptr;
             if (result != ValidateResult::Reject) {
                 if (result > best_match.result) {
                     best_match.descriptor = fmt;

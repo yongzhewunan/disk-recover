@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "signature_scanner.hpp"
-#include "file_signatures.hpp"
+#include "format_registry.hpp"
 
 using namespace disk_recover;
 
@@ -30,9 +30,12 @@ TEST(SignatureScannerTest, TryRecoverFileCreatesBasicRecord) {
     SignatureScanner scanner;
 
     RecoverableFile file;
-    FileSignature sig{FileType::Image, L"jpg", L"JPEG"};
+    FormatDescriptor desc;
+    desc.file_type = FileType::Image;
+    desc.extension = L"jpg";
+    desc.description = L"JPEG";
 
     // Note: try_recover_file is private, so we test scan behavior indirectly
     // For now, just verify the structure exists
-    EXPECT_EQ(sig.file_type, FileType::Image);
+    EXPECT_EQ(desc.file_type, FileType::Image);
 }

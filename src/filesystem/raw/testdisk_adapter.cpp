@@ -19,11 +19,22 @@
 #include <algorithm>
 #include <stdexcept>
 
+// Windows API for temporary file operations in file_check
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 extern "C" {
 #include "../external/testdisk/common.h"
 }
 
 namespace disk_recover {
+
+// ============================================================================
+// Dispatch context — defined here, declared extern in header
+// ============================================================================
+const wchar_t* g_td_dispatch_ext = nullptr;
 
 // ============================================================================
 // Result Mapping Functions
@@ -60,10 +71,10 @@ ValidateResult TestDiskValidator::map_header_result(int result) {
 // Constructor / Destructor
 // ============================================================================
 
-TestDiskValidator::TestDiskValidator(const file_hint_t* hint)
+TestDiskValidator::TestDiskValidator(const file_hint_t* hint, file_stat_t* file_stat)
     : hint_(hint)
     , recovery_ctx_(nullptr)
-    , file_stat_(nullptr)
+    , file_stat_(file_stat)
     , max_filesize_(0)
     , min_filesize_(0)
     , enabled_by_default_(false)
@@ -80,18 +91,21 @@ TestDiskValidator::TestDiskValidator(const file_hint_t* hint)
         throw std::bad_alloc();
     }
 
-    // Allocate file statistics
-    file_stat_ = (file_stat_t*)MALLOC(sizeof(file_stat_t));
+    // Note: file_stat_ may be null if called from old constructor path.
+    // In that case, allocate one.
     if (file_stat_ == nullptr) {
-        free(recovery_ctx_);
-        throw std::bad_alloc();
+        file_stat_ = (file_stat_t*)MALLOC(sizeof(file_stat_t));
+        if (file_stat_ == nullptr) {
+            free(recovery_ctx_);
+            throw std::bad_alloc();
+        }
+        file_stat_->not_recovered = 0;
+        file_stat_->recovered = 0;
+        file_stat_->file_hint = hint_;
     }
 
     // Initialize structures
     reset_file_recovery(recovery_ctx_);
-    file_stat_->not_recovered = 0;
-    file_stat_->recovered = 0;
-    file_stat_->file_hint = hint_;
 
     // Update cached values from hint
     update_cached_values();
@@ -108,9 +122,11 @@ TestDiskValidator::~TestDiskValidator() {
         }
         free(recovery_ctx_);
     }
-    if (file_stat_ != nullptr) {
-        free(file_stat_);
-    }
+    // Note: file_stat_ is owned by td_validators_init.c (static storage),
+    // so we don't free it here. If we allocated it ourselves (null param
+    // constructor), we would need to free it — but we don't track that.
+    // For now, the static file_stats in td_validators_init.c outlive
+    // everything, so this is safe.
 }
 
 // ============================================================================
@@ -144,9 +160,6 @@ TestDiskValidator& TestDiskValidator::operator=(TestDiskValidator&& other) noexc
                 fclose(recovery_ctx_->handle);
             }
             free(recovery_ctx_);
-        }
-        if (file_stat_ != nullptr) {
-            free(file_stat_);
         }
 
         // Move from other
@@ -243,13 +256,6 @@ ValidateResult TestDiskValidator::header_check(const uint8_t* data, size_t lengt
     // Reset context for new validation
     init_recovery_context();
 
-    // TestDisk's header_check expects:
-    // - buffer: pointer to data
-    // - buffer_size: size of buffer
-    // - safe_header_only: 0 for normal validation, 1 for safe header only
-    // - file_recovery: current recovery context (can be NULL for initial check)
-    // - file_recovery_new: output context with results
-
     // Create a new recovery context for output
     file_recovery_t* file_recovery_new = (file_recovery_t*)MALLOC(sizeof(file_recovery_t));
     if (file_recovery_new == nullptr) {
@@ -267,6 +273,7 @@ ValidateResult TestDiskValidator::header_check(const uint8_t* data, size_t lengt
     // We compare signature bytes and call the header_check callback.
     struct td_list_head *pos;
     int result = 0;
+    int checked_count = 0;
 
     td_list_for_each(pos, &file_check_plist.list) {
         file_check_t *fc = td_list_entry(pos, file_check_t, list);
@@ -276,10 +283,20 @@ ValidateResult TestDiskValidator::header_check(const uint8_t* data, size_t lengt
             continue;
         }
 
+        checked_count++;
+
         // Check if the signature matches
         if (fc->offset + fc->length <= length) {
-            if (memcmp(data + fc->offset, fc->value, fc->length) == 0) {
+            int cmp = memcmp(data + fc->offset, fc->value, fc->length);
+            printf("[TD-HC] ext=%s sig_cmp=%d (offset=%u, len=%u)\n",
+                   hint_->extension, cmp, fc->offset, fc->length);
+            if (cmp == 0) {
                 // Signature matched, call the header_check function
+                // Debug: print first 32 bytes of data
+                printf("[TD-HC] ext=%s data[0..31]=", hint_->extension);
+                for (int k = 0; k < 32 && k < (int)length; k++)
+                    printf("%02X", data[k]);
+                printf("\n");
                 result = fc->header_check(
                     data,
                     static_cast<unsigned int>(length),
@@ -287,6 +304,8 @@ ValidateResult TestDiskValidator::header_check(const uint8_t* data, size_t lengt
                     recovery_ctx_,
                     file_recovery_new
                 );
+
+                printf("[TD-HC] ext=%s sig_match=1 result=%d\n", hint_->extension, result);
 
                 if (result == 1) {
                     // Header check passed
@@ -313,6 +332,7 @@ ValidateResult TestDiskValidator::header_check(const uint8_t* data, size_t lengt
     }
 
     // No matching signature found or header check failed
+    printf("[TD-HC] ext=%s checked=%d entries, all rejected\n", hint_->extension, checked_count);
     calculated_file_size = 0;
     free(file_recovery_new);
     return ValidateResult::Reject;
@@ -366,24 +386,58 @@ ValidateResult TestDiskValidator::file_check(const uint8_t* data, size_t length,
         return ValidateResult::AcceptStructure;
     }
 
-    // Store complete file data for file_check
-    // Note: TestDisk's file_check typically reads from file handle
-    // We need to adapt this for in-memory validation
+    // TestDisk's file_check functions operate on FILE* handles.
+    // We create a temporary file from the in-memory buffer,
+    // set recovery_ctx_->handle, call file_check, then clean up.
 
-    // Set file_size to total length
+    // Generate temporary file path
+    char tmp_path[MAX_PATH];
+    char tmp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp_dir);
+    GetTempFileNameA(tmp_dir, "tdr", 0, tmp_path);
+
+    // Write buffer to temporary file
+    FILE* tmp_file = fopen(tmp_path, "wb");
+    if (tmp_file == nullptr) {
+        calculated_file_size = recovery_ctx_->calculated_file_size;
+        return ValidateResult::AcceptStructure;
+    }
+
+    size_t written = fwrite(data, 1, length, tmp_file);
+    fclose(tmp_file);
+
+    if (written != length) {
+        // Failed to write complete data
+        DeleteFileA(tmp_path);
+        calculated_file_size = recovery_ctx_->calculated_file_size;
+        return ValidateResult::AcceptStructure;
+    }
+
+    // Open for reading (TestDisk's file_check reads from handle)
+    tmp_file = fopen(tmp_path, "rb");
+    if (tmp_file == nullptr) {
+        DeleteFileA(tmp_path);
+        calculated_file_size = recovery_ctx_->calculated_file_size;
+        return ValidateResult::AcceptStructure;
+    }
+
+    // Set up recovery context for file_check
+    recovery_ctx_->handle = tmp_file;
     recovery_ctx_->file_size = length;
 
-    // For in-memory validation, we need to create a temporary file handle
-    // This is a workaround for TestDisk's file-based architecture
-
-    // Alternative: Modify TestDisk validators to support in-memory validation
-    // For now, we'll use a simplified approach
-
-    // Call file_check (if it doesn't require file handle)
+    // Call TestDisk's file_check
     recovery_ctx_->file_check(recovery_ctx_);
 
+    // Clean up
+    fclose(tmp_file);
+    recovery_ctx_->handle = nullptr;
+    DeleteFileA(tmp_path);
+
     // Extract final file size
-    calculated_file_size = recovery_ctx_->file_size;
+    calculated_file_size = recovery_ctx_->calculated_file_size;
+    if (calculated_file_size == 0) {
+        calculated_file_size = recovery_ctx_->file_size;
+    }
 
     // Update has_file_check flag
     has_file_check_ = true;
@@ -401,8 +455,8 @@ ValidateResult TestDiskValidator::file_check(const uint8_t* data, size_t length,
 // Factory Function
 // ============================================================================
 
-std::unique_ptr<TestDiskValidator> create_validator(const file_hint_t* hint) {
-    return std::make_unique<TestDiskValidator>(hint);
+std::unique_ptr<TestDiskValidator> create_validator(const file_hint_t* hint, file_stat_t* file_stat) {
+    return std::make_unique<TestDiskValidator>(hint, file_stat);
 }
 
 } // namespace disk_recover
