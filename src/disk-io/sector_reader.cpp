@@ -87,7 +87,22 @@ bool SectorReader::read_sectors(uint64_t start_sector, uint32_t count, AlignedBu
     offset.QuadPart = static_cast<LONGLONG>(start_sector) * sector_size_;
 
     LONG high = offset.HighPart;
-    ::SetFilePointer(handle_.native_handle(), offset.LowPart, &high, FILE_BEGIN);
+    DWORD result = ::SetFilePointer(handle_.native_handle(), offset.LowPart, &high, FILE_BEGIN);
+
+    // Check if SetFilePointer failed
+    // INVALID_SET_FILE_POINTER is returned on failure, but we must also check GetLastError
+    // because INVALID_SET_FILE_POINTER could be a valid return value on 64-bit systems
+    if (result == INVALID_SET_FILE_POINTER) {
+        DWORD error = GetLastError();
+        if (error != NO_ERROR) {
+            LOG_FMT(L"[SectorReader] SetFilePointer failed at sector %llu, error=%d",
+                     start_sector, error);
+            if (bad_sectors_) {
+                bad_sectors_->record(start_sector, count);
+            }
+            return false;
+        }
+    }
 
     DWORD bytes_to_read = count * sector_size_;
     DWORD bytes_read = 0;

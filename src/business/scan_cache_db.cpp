@@ -434,6 +434,9 @@ std::vector<RecoverableFile> ScanCacheDB::query_files_after_id(const std::string
 }
 
 bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgress& progress) {
+    // Use snapshot to get atomic values
+    auto snap = progress.snapshot();
+
     const char* sql = R"(
         INSERT OR REPLACE INTO scan_progress
             (session_id, sectors_scanned, total_sectors, files_found,
@@ -446,14 +449,14 @@ bool ScanCacheDB::save_progress(const std::string& session_id, const ScanProgres
     if (rc != SQLITE_OK) return false;
 
     sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(progress.sectors_scanned));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(progress.total_sectors));
-    sqlite3_bind_int(stmt, 4, static_cast<int>(progress.files_found));
-    sqlite3_bind_int(stmt, 5, static_cast<int>(progress.bad_sectors_hit));
-    sqlite3_bind_int(stmt, 6, progress.is_paused ? 1 : 0);
-    sqlite3_bind_int(stmt, 7, progress.is_complete ? 1 : 0);
-    sqlite3_bind_int(stmt, 8, static_cast<int>(progress.scan_phase));
-    sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(progress.raw_resume_sector));
+    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(snap.sectors_scanned));
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(snap.total_sectors));
+    sqlite3_bind_int(stmt, 4, static_cast<int>(snap.files_found));
+    sqlite3_bind_int(stmt, 5, static_cast<int>(snap.bad_sectors_hit));
+    sqlite3_bind_int(stmt, 6, snap.is_paused ? 1 : 0);
+    sqlite3_bind_int(stmt, 7, snap.is_complete ? 1 : 0);
+    sqlite3_bind_int(stmt, 8, static_cast<int>(snap.scan_phase));
+    sqlite3_bind_int64(stmt, 9, static_cast<sqlite3_int64>(snap.raw_resume_sector));
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -478,14 +481,16 @@ bool ScanCacheDB::load_progress(const std::string& session_id, ScanProgress& pro
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         found = true;
-        progress.sectors_scanned = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
-        progress.total_sectors = static_cast<uint64_t>(sqlite3_column_int64(stmt, 1));
-        progress.files_found = static_cast<uint32_t>(sqlite3_column_int(stmt, 2));
-        progress.bad_sectors_hit = static_cast<uint32_t>(sqlite3_column_int(stmt, 3));
-        progress.is_paused = sqlite3_column_int(stmt, 4) != 0;
-        progress.is_complete = sqlite3_column_int(stmt, 5) != 0;
-        progress.scan_phase = static_cast<uint8_t>(sqlite3_column_int(stmt, 6));
-        progress.raw_resume_sector = static_cast<uint64_t>(sqlite3_column_int64(stmt, 7));
+        ScanProgress::Snapshot snap;
+        snap.sectors_scanned = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
+        snap.total_sectors = static_cast<uint64_t>(sqlite3_column_int64(stmt, 1));
+        snap.files_found = static_cast<uint32_t>(sqlite3_column_int(stmt, 2));
+        snap.bad_sectors_hit = static_cast<uint32_t>(sqlite3_column_int(stmt, 3));
+        snap.is_paused = sqlite3_column_int(stmt, 4) != 0;
+        snap.is_complete = sqlite3_column_int(stmt, 5) != 0;
+        snap.scan_phase = static_cast<uint8_t>(sqlite3_column_int(stmt, 6));
+        snap.raw_resume_sector = static_cast<uint64_t>(sqlite3_column_int64(stmt, 7));
+        progress.load_from(snap);
     }
 
     sqlite3_finalize(stmt);

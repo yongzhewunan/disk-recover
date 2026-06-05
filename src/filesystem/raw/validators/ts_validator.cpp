@@ -14,7 +14,7 @@ static const uint8_t TS_MAGIC[] = {0x47};
 // ── Phase 1: Header check ──
 // Detects M2TS (192-byte packets with 4-byte timestamp prefix) vs MTS (188-byte packets).
 // Uses sliding sync search for 0x47 at 188-byte intervals.
-// Requires minimum 3 consecutive syncs for AcceptHeader, 5+ for AcceptStructure.
+// Requires minimum 8 consecutive syncs for AcceptStructure (reduced false positives).
 // Includes PID consistency check to reduce false positives.
 // Returns AcceptStructure if periodicity and PID patterns confirmed.
 ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
@@ -86,11 +86,11 @@ ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t
         }
     }
 
-    // Phase 2: Enhanced periodicity check (5-10 packets for high confidence)
+    // Phase 2: Enhanced periodicity check (8+ packets for high confidence)
     // This is critical for distinguishing TS from random data
-    constexpr int MIN_PACKETS_FOR_STRUCTURE = 5;
-    constexpr int MIN_PACKETS_FOR_HEADER = 3;  // Increased from 2 to reduce false positives
-    constexpr int MAX_PACKETS_TO_SCAN = 10;
+    constexpr int MIN_PACKETS_FOR_STRUCTURE = 8;  // Increased from 5 to reduce false positives
+    constexpr int MIN_PACKETS_FOR_HEADER = 5;    // Increased from 3 to reduce false positives
+    constexpr int MAX_PACKETS_TO_SCAN = 15;
 
     int sync_count_extended = 0;
     for (int packet = 0; packet < MAX_PACKETS_TO_SCAN; ++packet) {
@@ -141,7 +141,7 @@ ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t
     }
 
     // Require minimum sync count for acceptance
-    // Single or double sync byte is NOT sufficient (removed old AcceptHeader for 1-2 syncs)
+    // Less than MIN_PACKETS_FOR_HEADER is insufficient (reject false positives)
     if (sync_count_extended < MIN_PACKETS_FOR_HEADER) {
         return ValidateResult::Reject;  // Insufficient syncs - likely false positive
     }
@@ -150,17 +150,17 @@ ValidateResult check_ts_header_impl(const uint8_t* data, size_t length, uint64_t
     // Good patterns: known PIDs present, or few unique PIDs (consistent stream)
     bool good_pid_quality = has_valid_pid_pattern || (unique_pids <= 3 && valid_pid_count >= sync_count_extended - 1);
 
-    // Periodicity confirmed with 5+ packets AND good PID pattern
+    // Periodicity confirmed with 8+ packets AND good PID pattern
     if (sync_count_extended >= MIN_PACKETS_FOR_STRUCTURE && good_pid_quality) {
         return ValidateResult::AcceptStructure;
     }
 
-    // 3-4 packets with good PID pattern: partial confidence
+    // 5-7 packets with good PID pattern: partial confidence
     if (sync_count_extended >= MIN_PACKETS_FOR_HEADER && good_pid_quality) {
         return ValidateResult::AcceptHeader;
     }
 
-    // 3-4 packets but poor PID pattern: still AcceptHeader but lower confidence
+    // 5-7 packets but poor PID pattern: still AcceptHeader but lower confidence
     // This allows damaged TS streams to be detected
     if (sync_count_extended >= MIN_PACKETS_FOR_HEADER) {
         return ValidateResult::AcceptHeader;

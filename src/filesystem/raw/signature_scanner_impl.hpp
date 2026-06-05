@@ -328,7 +328,7 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
                             std::function<void(RecoverableFile&&)> on_file_found,
                             std::function<void(const ScanProgress&)> on_progress) {
     ScanProgress progress{};
-    progress.total_sectors = config.end_sector - config.start_sector;
+    progress.total_sectors.store(config.end_sector - config.start_sector, std::memory_order_relaxed);
 
     const uint32_t sector_size = reader.sector_size();
     const uint32_t BATCH_SECTORS = 8192;
@@ -350,10 +350,10 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
         }
     }
 
-    progress.sectors_scanned = initial_scanned;
+    progress.sectors_scanned.store(initial_scanned, std::memory_order_relaxed);
 
     LOG_FMT(L"[SigScanner] Starting RAW scan: sector %llu to %llu, total=%llu",
-             config.start_sector, config.end_sector, progress.total_sectors);
+             config.start_sector, config.end_sector, progress.total_sectors.load());
 
     // Test FormatRegistry initialization before main scan loop
     uint8_t test_jpeg[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01};
@@ -368,7 +368,7 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
     AlignedBuffer batch_buf(BATCH_SECTORS * sector_size, sector_size);
     if (batch_buf.empty()) {
         LOG_MSG(L"[SigScanner] Failed to allocate scan buffer");
-        progress.is_complete = true;
+        progress.is_complete.store(true, std::memory_order_relaxed);
         if (on_progress) on_progress(progress);
         return;
     }
@@ -407,8 +407,8 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
             consecutive_bad_batches++;
             if (skip_cfg.enabled && consecutive_bad_batches >= skip_cfg.consecutive_bad_threshold) {
                 uint64_t actual_skip = (std::min)(current_skip_distance, config.end_sector - sector);
-                progress.sectors_scanned += actual_skip;
-                progress.bad_sectors_hit += actual_skip;
+                progress.sectors_scanned.fetch_add(actual_skip, std::memory_order_relaxed);
+                progress.bad_sectors_hit.fetch_add(actual_skip, std::memory_order_relaxed);
                 if (actual_skip >= BATCH_SECTORS) {
                     sector += (actual_skip - BATCH_SECTORS);
                 } else {
@@ -445,7 +445,7 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
             sig_count++;
             RecoverableFile file{};
             if (try_recover_file(reader, cur_sector, *match_result, file)) {
-                progress.files_found++;
+                progress.files_found.fetch_add(1, std::memory_order_relaxed);
 
                 uint64_t file_end = cur_sector;
                 for (const auto& frag : file.fragments) {
@@ -475,8 +475,8 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
             }
         }
 
-        progress.sectors_scanned += batch_count;
-        progress.bad_sectors_hit += bad_count;
+        progress.sectors_scanned.fetch_add(batch_count, std::memory_order_relaxed);
+        progress.bad_sectors_hit.fetch_add(bad_count, std::memory_order_relaxed);
 
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_save_time).count();
@@ -501,14 +501,15 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
     }
 
     LOG_FMT(L"[SigScanner] RAW scan complete: signatures=%u, files_found=%llu, sectors_scanned=%llu",
-             sig_count, static_cast<unsigned long long>(progress.files_found), static_cast<unsigned long long>(progress.sectors_scanned));
+             sig_count, static_cast<unsigned long long>(progress.files_found.load()),
+             static_cast<unsigned long long>(progress.sectors_scanned.load()));
 
     auto merged = merge_video_fragments(video_files, sector_size);
     for (auto& file : merged) {
         if (on_file_found) on_file_found(std::move(file));
     }
 
-    progress.is_complete = true;
+    progress.is_complete.store(true, std::memory_order_relaxed);
     if (on_progress) on_progress(progress);
 }
 

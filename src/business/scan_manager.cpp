@@ -72,7 +72,15 @@ bool ScanManager::start_scan(const Config& config) {
     scanning_ = true;
     paused_ = false;
     stop_requested_ = false;
-    progress_ = {};
+    // Reset atomic progress values
+    progress_.sectors_scanned.store(0, std::memory_order_relaxed);
+    progress_.total_sectors.store(0, std::memory_order_relaxed);
+    progress_.files_found.store(0, std::memory_order_relaxed);
+    progress_.bad_sectors_hit.store(0, std::memory_order_relaxed);
+    progress_.is_paused.store(false, std::memory_order_relaxed);
+    progress_.is_complete.store(false, std::memory_order_relaxed);
+    progress_.scan_phase.store(0, std::memory_order_relaxed);
+    progress_.raw_resume_sector.store(0, std::memory_order_relaxed);
     current_session_id_ = config.session_id;
 
     if (!cache_db_.open(config.db_path)) {
@@ -103,7 +111,8 @@ bool ScanManager::resume_scan(const Config& config) {
         return false;
     }
 
-    if (saved_progress.is_complete) {
+    auto snap = saved_progress.snapshot();
+    if (snap.is_complete) {
         cache_db_.close();
         return false;
     }
@@ -111,7 +120,7 @@ bool ScanManager::resume_scan(const Config& config) {
     scanning_ = true;
     paused_ = false;
     stop_requested_ = false;
-    progress_ = saved_progress;
+    progress_.load_from(snap);  // Load atomics from snapshot
     current_session_id_ = config.session_id;
 
     // scan_thread_func will read saved_progress internally via cache_db_
@@ -130,11 +139,6 @@ void ScanManager::stop_scan() {
     if (scan_thread_.joinable()) {
         scan_thread_.join();
     }
-}
-
-ScanProgress ScanManager::progress() const {
-    std::lock_guard lock(progress_mutex_);
-    return progress_;
 }
 
 std::vector<RecoverableFile> ScanManager::take_found_files() {
@@ -180,22 +184,20 @@ void ScanManager::scan_thread_func(Config config) {
     auto existing_keys = cache_db_.load_file_keys(config.session_id);
 
     // If resuming and metadata phase already done, skip to RAW
-    bool skip_metadata = has_saved && saved_progress.scan_phase >= 1;
+    auto saved_snap = saved_progress.snapshot();
+    bool skip_metadata = has_saved && saved_snap.scan_phase >= 1;
 
     if (skip_metadata) {
         // Restore progress counters from saved state
-        progress_.sectors_scanned = saved_progress.sectors_scanned;
-        progress_.files_found = saved_progress.files_found;
-        progress_.bad_sectors_hit = saved_progress.bad_sectors_hit;
+        progress_.sectors_scanned.store(saved_snap.sectors_scanned, std::memory_order_relaxed);
+        progress_.files_found.store(saved_snap.files_found, std::memory_order_relaxed);
+        progress_.bad_sectors_hit.store(saved_snap.bad_sectors_hit, std::memory_order_relaxed);
     }
 
-    {
-        std::lock_guard lock(progress_mutex_);
-        progress_.total_sectors = end_sector - start_sector;
-    }
+    progress_.total_sectors.store(end_sector - start_sector, std::memory_order_relaxed);
 
     LOG_FMT(L"[ScanManager] Scan range: sector %llu to %llu (%llu sectors)",
-             start_sector, end_sector, progress_.total_sectors);
+             start_sector, end_sector, progress_.total_sectors.load());
 
     auto on_file = [this, &existing_keys](RecoverableFile&& file) {
         if (stop_requested_.load()) return;
@@ -217,10 +219,7 @@ void ScanManager::scan_thread_func(Config config) {
             }
             need_progress = (ui_files_.size() % 20 == 0);
         }
-        {
-            std::lock_guard lock(progress_mutex_);
-            progress_.files_found++;
-        }
+        progress_.files_found.fetch_add(1, std::memory_order_relaxed);
         if (need_flush) {
             flush_cache(current_session_id_);
         }
@@ -234,12 +233,10 @@ void ScanManager::scan_thread_func(Config config) {
         while (paused_.load() && !stop_requested_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        {
-            std::lock_guard lock(progress_mutex_);
-            progress_.sectors_scanned = p.sectors_scanned;
-            progress_.bad_sectors_hit = p.bad_sectors_hit;
-            progress_.raw_resume_sector = p.sectors_scanned;
-        }
+        auto snap = p.snapshot();
+        progress_.sectors_scanned.store(snap.sectors_scanned, std::memory_order_relaxed);
+        progress_.bad_sectors_hit.store(snap.bad_sectors_hit, std::memory_order_relaxed);
+        progress_.raw_resume_sector.store(snap.sectors_scanned, std::memory_order_relaxed);
         cache_db_.save_progress(current_session_id_, progress_);
         if (on_progress_) on_progress_(progress_);
     };
@@ -261,12 +258,11 @@ void ScanManager::scan_thread_func(Config config) {
                             LOG_MSG(L"[ScanManager] Parsing NTFS MFT...");
                             parser.enumerate_mft(reader, on_file, true,
                                 [this]() { return stop_requested_.load(); });
-                            {
-                                std::lock_guard lock(progress_mutex_);
-                                progress_.sectors_scanned = parser.mft_start_sector() +
-                                    (geo.total_sectors / parser.mft_record_size());
-                            }
-                            LOG_FMT(L"[ScanManager] NTFS scan done, files_found=%llu", progress_.files_found);
+                            progress_.sectors_scanned.store(
+                                parser.mft_start_sector() + (geo.total_sectors / parser.mft_record_size()),
+                                std::memory_order_relaxed);
+                            LOG_FMT(L"[ScanManager] NTFS scan done, files_found=%llu",
+                                     progress_.files_found.load());
                         } else {
                             LOG_MSG(L"[ScanManager] Failed to parse NTFS boot sector");
                         }
@@ -282,11 +278,10 @@ void ScanManager::scan_thread_func(Config config) {
                             LOG_MSG(L"[ScanManager] Parsing FAT root directory...");
                             parser.enumerate_root_dir(reader, on_file, true,
                                 [this]() { return stop_requested_.load(); });
-                            {
-                                std::lock_guard lock(progress_mutex_);
-                                progress_.sectors_scanned = parser.data_start_sector();
-                            }
-                            LOG_FMT(L"[ScanManager] FAT scan done, files_found=%llu", progress_.files_found);
+                            progress_.sectors_scanned.store(parser.data_start_sector(),
+                                                             std::memory_order_relaxed);
+                            LOG_FMT(L"[ScanManager] FAT scan done, files_found=%llu",
+                                     progress_.files_found.load());
                         } else {
                             LOG_MSG(L"[ScanManager] Failed to parse FAT boot sector");
                         }
@@ -348,10 +343,8 @@ void ScanManager::scan_thread_func(Config config) {
                                     [this]() { return stop_requested_.load(); });
                                 metadata_end_sector = parser.mft_start_sector() +
                                     (geo.total_sectors / parser.mft_record_size());
-                                {
-                                    std::lock_guard lock(progress_mutex_);
-                                    progress_.sectors_scanned = metadata_end_sector;
-                                }
+                                progress_.sectors_scanned.store(metadata_end_sector,
+                                                                std::memory_order_relaxed);
                                 if (on_progress_) on_progress_(progress_);
                             }
                         }
@@ -367,10 +360,8 @@ void ScanManager::scan_thread_func(Config config) {
                                 parser.enumerate_root_dir(reader, on_file, true,
                                     [this]() { return stop_requested_.load(); });
                                 metadata_end_sector = parser.data_start_sector();
-                                {
-                                    std::lock_guard lock(progress_mutex_);
-                                    progress_.sectors_scanned = metadata_end_sector;
-                                }
+                                progress_.sectors_scanned.store(metadata_end_sector,
+                                                                std::memory_order_relaxed);
                                 if (on_progress_) on_progress_(progress_);
                             }
                         }
@@ -383,18 +374,12 @@ void ScanManager::scan_thread_func(Config config) {
                     }
 
                     // Mark phase 1 complete and save
-                    {
-                        std::lock_guard lock(progress_mutex_);
-                        progress_.scan_phase = 1;
-                    }
+                    progress_.scan_phase.store(1, std::memory_order_relaxed);
                     cache_db_.save_progress(current_session_id_, progress_);
                 }
 
                 // Phase 2: RAW scan
-                {
-                    std::lock_guard lock(progress_mutex_);
-                    progress_.scan_phase = 2;
-                }
+                progress_.scan_phase.store(2, std::memory_order_relaxed);
 
                 if (metadata_end_sector < end_sector && !stop_requested_.load()) {
                     LOG_FMT(L"[ScanManager] Phase 2: RAW scan sectors %llu to %llu",
@@ -411,8 +396,8 @@ void ScanManager::scan_thread_func(Config config) {
                     scan_config.should_stop = [this]() { return stop_requested_.load(); };
 
                     // Set resume point if resuming from phase 2
-                    if (has_saved && saved_progress.scan_phase >= 2 && saved_progress.raw_resume_sector > metadata_end_sector) {
-                        scan_config.resume_from_sector = saved_progress.raw_resume_sector;
+                    if (has_saved && saved_snap.scan_phase >= 2 && saved_snap.raw_resume_sector > metadata_end_sector) {
+                        scan_config.resume_from_sector = saved_snap.raw_resume_sector;
                     }
 
                     scanner.scan(reader, scan_config, on_file, on_scan_progress);
@@ -434,8 +419,8 @@ void ScanManager::scan_thread_func(Config config) {
                 scan_config.should_stop = [this]() { return stop_requested_.load(); };
 
                 // Set resume point if resuming
-                if (has_saved && saved_progress.raw_resume_sector > start_sector) {
-                    scan_config.resume_from_sector = saved_progress.raw_resume_sector;
+                if (has_saved && saved_snap.raw_resume_sector > start_sector) {
+                    scan_config.resume_from_sector = saved_snap.raw_resume_sector;
                 }
 
                 scanner.scan(reader, scan_config, on_file, on_scan_progress);
@@ -447,17 +432,15 @@ void ScanManager::scan_thread_func(Config config) {
     // All cleanup happens HERE in the scan thread, not in stop_scan()
     flush_cache(current_session_id_);
 
-    {
-        std::lock_guard lock(progress_mutex_);
-        progress_.is_complete = true;
-    }
+    progress_.is_complete.store(true, std::memory_order_relaxed);
 
     cache_db_.save_progress(current_session_id_, progress_);
     cache_db_.close();
     scanning_ = false;
 
     LOG_FMT(L"[ScanManager] Scan done: files_found=%llu, sectors=%llu, bad=%llu",
-             progress_.files_found, progress_.sectors_scanned, progress_.bad_sectors_hit);
+             progress_.files_found.load(), progress_.sectors_scanned.load(),
+             progress_.bad_sectors_hit.load());
 
     // Final notification to UI (thread-safe via PostMessage)
     if (on_progress_) on_progress_(progress_);

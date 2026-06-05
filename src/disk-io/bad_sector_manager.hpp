@@ -7,6 +7,9 @@ namespace disk_recover {
 
 class BadSectorManager {
 public:
+    BadSectorManager() = default;
+    ~BadSectorManager();  // Destructor calls close() for RAII
+
     void open(const std::wstring& db_path);
     void close();
 

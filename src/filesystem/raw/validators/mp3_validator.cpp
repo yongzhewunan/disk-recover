@@ -21,9 +21,9 @@ static const uint8_t MP3_MAGIC[] = {0xFF, 0xE0};  // Mask: sync + minimum versio
 //   + valid layer (I, II, III) + valid bitrate index (not 0 or 15)
 //   + valid sample rate index (not 3). Return AcceptHeader.
 //
-// Phase 2 (data_check): Validate 3+ consecutive MPEG frames with consistent
+// Phase 2 (data_check): Validate 5+ consecutive MPEG frames with consistent
 //   version/layer/sample rate. Parse XING/VBRI header for frame count if present.
-//   Return AcceptStructure after 3+ consistent frames.
+//   Return AcceptStructure after 5+ consistent frames.
 //   If XING header found with total bytes, set calculated_file_size and return AcceptVerified.
 //
 // Reference: ISO/IEC 11172-3 (MPEG-1 Audio), ISO/IEC 13818-3 (MPEG-2 Audio).
@@ -235,7 +235,7 @@ ValidateResult check_mp3_header_impl(const uint8_t* data, size_t length, uint64_
 }
 
 // ── Phase 2: Data check ──
-// Validate 3+ consecutive MPEG frames with consistent version/layer/sample rate.
+// Validate 5+ consecutive MPEG frames with consistent version/layer/sample rate.
 // Parse XING/VBRI header for frame count if present.
 ValidateResult check_mp3_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
     // For the first block, start from offset 0 in the file
@@ -272,8 +272,9 @@ ValidateResult check_mp3_data_impl(const uint8_t* data, size_t length, uint64_t 
         if (!found) return ValidateResult::AcceptHeader;  // No valid frame in this block
     }
 
-    // Walk consecutive frames
-    const int MAX_FRAMES = 10;
+    // Walk consecutive frames - need 5+ for AcceptStructure (reduced false positives)
+    constexpr int MIN_FRAMES_FOR_STRUCTURE = 5;
+    const int MAX_FRAMES = 15;
     while (consistent_frames < MAX_FRAMES && pos + 4 <= length) {
         FrameInfo frame;
         if (!parse_mpeg_frame(data, length, pos, frame)) break;
@@ -289,7 +290,7 @@ ValidateResult check_mp3_data_impl(const uint8_t* data, size_t length, uint64_t 
         pos += frame.frame_size;
     }
 
-    if (consistent_frames >= 3) {
+    if (consistent_frames >= MIN_FRAMES_FOR_STRUCTURE) {
         return ValidateResult::AcceptStructure;
     }
 

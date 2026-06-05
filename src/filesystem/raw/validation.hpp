@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <compare>
 
 namespace disk_recover {
 
@@ -14,18 +15,10 @@ enum class ValidateResult : uint8_t {
     AcceptVerified  = 4,  // Full validation including size bounds / footer found
 };
 
-// Comparison operators for ValidateResult
-inline bool operator>=(ValidateResult a, ValidateResult b) {
-    return static_cast<uint8_t>(a) >= static_cast<uint8_t>(b);
-}
-inline bool operator<=(ValidateResult a, ValidateResult b) {
-    return static_cast<uint8_t>(a) <= static_cast<uint8_t>(b);
-}
-inline bool operator>(ValidateResult a, ValidateResult b) {
-    return static_cast<uint8_t>(a) > static_cast<uint8_t>(b);
-}
-inline bool operator<(ValidateResult a, ValidateResult b) {
-    return static_cast<uint8_t>(a) < static_cast<uint8_t>(b);
+// C++20 spaceship operator generates all 6 comparison operators (==, !=, <, <=, >, >=)
+// For scoped enums, we need to explicitly specify the return type
+inline std::strong_ordering operator<=>(ValidateResult a, ValidateResult b) {
+    return static_cast<uint8_t>(a) <=> static_cast<uint8_t>(b);
 }
 
 // Map ValidateResult to a 0-100 confidence value for UI backward compatibility.

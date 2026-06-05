@@ -3,6 +3,10 @@
 
 namespace disk_recover {
 
+BadSectorManager::~BadSectorManager() {
+    close();
+}
+
 void BadSectorManager::open(const std::wstring& db_path) {
     db_path_ = db_path;
     std::ifstream in(db_path, std::ios::binary);

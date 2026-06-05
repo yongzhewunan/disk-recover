@@ -54,7 +54,7 @@ public:
 
     bool is_scanning() const { return scanning_.load(); }
     bool is_paused() const { return paused_.load(); }
-    ScanProgress progress() const;
+    ScanProgress::Snapshot progress() const { return progress_.snapshot(); }
 
     // Thread-safe access to found files for UI batch updates
     std::vector<RecoverableFile> take_found_files();
@@ -72,8 +72,7 @@ private:
     std::atomic<bool> paused_{false};
     std::atomic<bool> stop_requested_{false};
 
-    mutable std::mutex progress_mutex_;
-    ScanProgress progress_{};
+    ScanProgress progress_;  // Atomic fields, no mutex needed
 
     std::mutex files_mutex_;
     std::vector<RecoverableFile> pending_files_;
