@@ -164,74 +164,30 @@ ValidateResult check_png_header_impl(const uint8_t* data, size_t length, uint64_
 // Walks chunk structure looking for IEND chunk, validates chunk types along the way.
 // Replaces simple pattern matching with proper chunk traversal (PhotoRec approach).
 ValidateResult check_png_data_impl(const uint8_t* data, size_t length, uint64_t offset_in_file, uint64_t& calculated_file_size) {
-    // For blocks near the file start (offset < PNG header + IHDR), we may not be
-    // aligned to chunk boundaries. Fall back to IEND pattern search for the first block.
-    // Subsequent blocks should be at positions where chunk traversal works.
+    // IEND chunk pattern: 00 00 00 00 49 45 4E 44 AE 42 60 82
+    static const uint8_t IEND_PATTERN[] = {
+        0x00, 0x00, 0x00, 0x00,  // length = 0
+        0x49, 0x45, 0x4E, 0x44,  // "IEND"
+        0xAE, 0x42, 0x60, 0x82   // CRC of IEND
+    };
 
-    // Minimum offset where chunk data can start: 8 (sig) + 25 (IHDR) = 33
-    // If we're close to the file start, the header_check already validated IHDR,
-    // so we just need to look for IEND. Use pattern matching for alignment safety.
-    if (offset_in_file < 33) {
-        // IEND chunk pattern: 00 00 00 00 49 45 4E 44 AE 42 60 82
-        static const uint8_t IEND_PATTERN[] = {
-            0x00, 0x00, 0x00, 0x00,  // length = 0
-            0x49, 0x45, 0x4E, 0x44,  // "IEND"
-            0xAE, 0x42, 0x60, 0x82   // CRC of IEND
-        };
-
-        for (size_t i = 0; i + 12 <= length; ++i) {
-            bool match = true;
-            for (size_t j = 0; j < 12; j++) {
-                if (data[i + j] != IEND_PATTERN[j]) { match = false; break; }
-            }
-            if (match) {
-                calculated_file_size = offset_in_file + i + 12;
-                return ValidateResult::AcceptVerified;
-            }
+    // Always scan for IEND pattern regardless of offset alignment.
+    // This is more robust than chunk traversal when data blocks may not be
+    // aligned to chunk boundaries (e.g., progressive carving with 32KB blocks).
+    for (size_t i = 0; i + 12 <= length; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < 12; j++) {
+            if (data[i + j] != IEND_PATTERN[j]) { match = false; break; }
         }
-        return ValidateResult::AcceptStructure;  // Keep carving
-    }
-
-    // For blocks beyond the header region, walk the chunk stream
-    auto is_letter = [](uint8_t b) { return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z'); };
-
-    size_t pos = 0;
-    const size_t MAX_CHUNKS_PER_BLOCK = 1000;  // Safety limit against runaway loops
-
-    for (size_t chunk_count = 0; chunk_count < MAX_CHUNKS_PER_BLOCK; ++chunk_count) {
-        if (pos + PNG_CHUNK_HEADER_SIZE > length) break;  // Need at least chunk header
-
-        uint32_t data_length = read_be32(data + pos);
-        if (data_length > 0x7FFFFFFF) return ValidateResult::Reject;  // Invalid length
-
-        uint8_t t0 = data[pos + 4], t1 = data[pos + 5];
-        uint8_t t2 = data[pos + 6], t3 = data[pos + 7];
-
-        // Validate chunk type: all 4 bytes must be ASCII letters (PNG spec + PhotoRec)
-        if (!is_letter(t0) || !is_letter(t1) || !is_letter(t2) || !is_letter(t3))
-            return ValidateResult::Reject;  // Corrupted chunk stream
-
-        // ── IEND chunk — end of PNG ──
-        if (t0 == 'I' && t1 == 'E' && t2 == 'N' && t3 == 'D') {
-            if (data_length != 0) return ValidateResult::Reject;  // IEND must have 0 data
-
-            // Verify IEND CRC (if we have enough data)
-            if (pos + 12 <= length) {
-                // CRC covers type + data (4 bytes for "IEND" + 0 data bytes)
-                uint32_t stored_crc   = read_be32(data + pos + 8);
-                uint32_t computed_crc = crc32(data + pos + 4, 4);  // CRC over "IEND" type only
-                if (stored_crc != computed_crc) return ValidateResult::Reject;
-            }
-            calculated_file_size = offset_in_file + pos + 12;
+        if (match) {
+            calculated_file_size = offset_in_file + i + 12;
             return ValidateResult::AcceptVerified;
         }
-
-        // Advance to next chunk
-        uint64_t total_chunk_size = static_cast<uint64_t>(data_length)
-                                  + PNG_CHUNK_HEADER_SIZE + PNG_CHUNK_FOOTER_SIZE;
-        pos += static_cast<size_t>(total_chunk_size);
-        if (pos > length) break;  // Next chunk extends beyond this block
     }
+
+    // For offset < 33, header_check already validated IHDR, so we just need to find IEND.
+    // For offset >= 33, we also try chunk traversal as a secondary check.
+    // But since blocks may not be aligned to chunk boundaries, we only use IEND pattern search.
 
     // No IEND found in this block — continue carving
     return ValidateResult::AcceptStructure;
