@@ -214,6 +214,79 @@ void scan_drives(const Config& cfg) {
     std::cout << "\nTotal files scanned: " << total_scanned << "\n";
 }
 
+void copy_files(const Config& cfg) {
+    if (cfg.dry_run) {
+        std::cout << "\n[DRY RUN] Would copy:\n";
+    } else {
+        // Create output directory
+        std::error_code ec;
+        fs::create_directories(cfg.output_dir, ec);
+
+        if (ec) {
+            std::cerr << "Error creating output directory: " << ec.message() << "\n";
+            return;
+        }
+    }
+
+    size_t total_copied = 0;
+    size_t total_skipped = 0;
+
+    for (const auto& [ext, info] : g_formats) {
+        // Only process target extensions (skip aliases like jpeg->jpg)
+        if (ext != info.extension) continue;
+
+        if (info.found_files.empty()) {
+            std::cout << "  [" << ext << "] No files found\n";
+            continue;
+        }
+
+        // Create format subdirectory
+        fs::path format_dir = cfg.output_dir / ext;
+        if (!cfg.dry_run) {
+            fs::create_directories(format_dir);
+        }
+
+        std::cout << "  [" << ext << "] Copying " << info.found_files.size() << " files...\n";
+
+        for (const auto& src : info.found_files) {
+            fs::path dst = format_dir / src.filename();
+
+            // Handle filename conflicts
+            if (fs::exists(dst)) {
+                // Add sequence number
+                int counter = 1;
+                std::string stem = src.stem().string();
+                std::string extension = src.extension().string();
+                while (fs::exists(dst)) {
+                    dst = format_dir / (stem + "_" + std::to_string(counter) + extension);
+                    counter++;
+                }
+            }
+
+            if (cfg.dry_run) {
+                std::cout << "    " << src << " -> " << dst << "\n";
+            } else {
+                std::error_code ec;
+                fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    std::cout << "    Error copying " << src << ": " << ec.message() << "\n";
+                    total_skipped++;
+                } else {
+                    if (cfg.verbose) {
+                        std::cout << "    Copied: " << src.filename() << "\n";
+                    }
+                    total_copied++;
+                }
+            }
+        }
+    }
+
+    std::cout << "\nCopied: " << total_copied << " files\n";
+    if (total_skipped > 0) {
+        std::cout << "Skipped (errors): " << total_skipped << " files\n";
+    }
+}
+
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [options]\n\n"
               << "Options:\n"
@@ -288,7 +361,9 @@ int main(int argc, char* argv[]) {
     // Scan drives
     scan_drives(cfg);
 
-    // TODO: Copy files
+    // Copy files
+    copy_files(cfg);
+
     // TODO: Generate report
 
     std::cout << "\nDone.\n";
