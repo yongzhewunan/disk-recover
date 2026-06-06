@@ -139,4 +139,72 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
     return std::nullopt;
 }
 
+std::vector<FormatRegistry::MatchResult> FormatRegistry::match_all(const uint8_t* data, size_t length) const {
+    std::vector<MatchResult> all_matches;
+
+    if (length == 0 || data == nullptr) {
+        return all_matches;
+    }
+
+    // Build index lazily on first use
+    if (!indexed_) {
+        const_cast<FormatRegistry*>(this)->build_index();
+    }
+
+    // Phase 1: Check first-byte indexed signatures (offset == 0)
+    const auto& candidates = first_byte_index_[data[0]];
+
+    for (const auto* fmt : candidates) {
+        // Quick signature match check before calling header_check
+        if (fmt->signature.offset == 0 &&
+            fmt->signature.pattern_len > 0 &&
+            length >= fmt->signature.pattern_len) {
+            if (std::memcmp(data, fmt->signature.pattern, fmt->signature.pattern_len) != 0) {
+                continue;  // Signature doesn't match, skip
+            }
+        }
+
+        // Run header_check
+        if (fmt->header_check) {
+            uint64_t calc_size = 0;
+            ValidateResult result = fmt->header_check(data, length, calc_size);
+            if (result != ValidateResult::Reject) {
+                all_matches.push_back({fmt, result, calc_size});
+            }
+        }
+    }
+
+    // Phase 2: Check offset signatures (offset > 0)
+    for (const auto* fmt : offset_signatures_) {
+        if (fmt->signature.offset > 0 &&
+            fmt->signature.pattern_len > 0 &&
+            length >= static_cast<size_t>(fmt->signature.offset + fmt->signature.pattern_len)) {
+            if (std::memcmp(data + fmt->signature.offset,
+                            fmt->signature.pattern,
+                            fmt->signature.pattern_len) != 0) {
+                continue;  // Signature doesn't match
+            }
+        } else {
+            continue;  // Not enough data to check signature
+        }
+
+        // Run header_check
+        if (fmt->header_check) {
+            uint64_t calc_size = 0;
+            ValidateResult result = fmt->header_check(data, length, calc_size);
+            if (result != ValidateResult::Reject) {
+                all_matches.push_back({fmt, result, calc_size});
+            }
+        }
+    }
+
+    // Sort by ValidateResult depth (deepest first)
+    std::sort(all_matches.begin(), all_matches.end(),
+        [](const MatchResult& a, const MatchResult& b) {
+            return a.result > b.result;
+        });
+
+    return all_matches;
+}
+
 } // namespace disk_recover

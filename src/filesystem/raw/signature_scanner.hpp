@@ -38,6 +38,12 @@ private:
     bool try_recover_file(ReaderType& reader, uint64_t start_sector,
                           const FormatRegistry::MatchResult& match_result, RecoverableFile& file);
 
+    // Multi-format parallel recovery: attempt recovery for all candidate formats
+    template<typename ReaderType>
+    std::vector<RecoverableFile> try_recover_all_formats(
+        ReaderType& reader, uint64_t start_sector,
+        const std::vector<FormatRegistry::MatchResult>& candidates);
+
     static std::vector<RecoverableFile> merge_video_fragments(
         std::vector<RecoverableFile>& files, uint32_t sector_size);
 };

@@ -75,6 +75,11 @@ struct RecoverableFile {
     // Raw MatchFlags bits from file_signatures.hpp MatchFlags enum
     uint32_t match_flags_raw = 0;
 
+    // Multi-format matching metadata
+    uint32_t candidate_index = 0;       // Index in multi-format candidate list
+    uint8_t total_candidates = 0;       // Total number of candidates for this sector
+    bool is_primary_candidate = false;  // True if highest confidence candidate
+
     // Legacy accessor for backward compatibility
     bool is_corrupted() const { return corruption_level != CorruptionLevel::None; }
 };

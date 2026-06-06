@@ -34,6 +34,11 @@ public:
     // Returns the best match (deepest ValidateResult), or std::nullopt if no match.
     std::optional<MatchResult> match(const uint8_t* data, size_t length) const;
 
+    // Match data against all registered formats and return ALL candidates.
+    // Returns a vector of all non-Reject matches, sorted by ValidateResult depth (deepest first).
+    // Used for multi-format parallel recovery.
+    std::vector<MatchResult> match_all(const uint8_t* data, size_t length) const;
+
     // Lookup all formats whose signature starts with the given byte.
     // Used for pre-filtering before running header_check.
     const std::vector<const FormatDescriptor*>& lookup_by_first_byte(uint8_t byte) const;

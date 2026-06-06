@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 namespace disk_recover {
 
@@ -448,34 +449,49 @@ void SignatureScanner::scan(ReaderType& reader, const ScanConfig& config,
 
             if (cur_sector < claimed_end_sector) continue;
 
-            // ── Use FormatRegistry for signature matching ──
-            auto match_result = FormatRegistry::instance().match(data, sector_size);
-            if (!match_result || match_result->result == ValidateResult::Reject) continue;
-
-            const FormatDescriptor* desc = match_result->descriptor;
+            // ── Use FormatRegistry for multi-format signature matching ──
+            auto all_matches = FormatRegistry::instance().match_all(data, sector_size);
+            if (all_matches.empty()) continue;
 
             // ── Type filtering based on ScanConfig ──
-            if (desc->file_type == FileType::Image && !config.scan_images) continue;
-            if (desc->file_type == FileType::Video && !config.scan_videos) continue;
-            if (desc->file_type == FileType::Audio && !config.scan_audio) continue;
-            if (desc->file_type == FileType::Document && !config.scan_documents) continue;
-            if (desc->file_type == FileType::Archive && !config.scan_archives) continue;
+            all_matches.erase(std::remove_if(all_matches.begin(), all_matches.end(),
+                [&config](const FormatRegistry::MatchResult& m) {
+                    const FormatDescriptor* desc = m.descriptor;
+                    if (desc->file_type == FileType::Image && !config.scan_images) return true;
+                    if (desc->file_type == FileType::Video && !config.scan_videos) return true;
+                    if (desc->file_type == FileType::Audio && !config.scan_audio) return true;
+                    if (desc->file_type == FileType::Document && !config.scan_documents) return true;
+                    if (desc->file_type == FileType::Archive && !config.scan_archives) return true;
+                    return false;
+                }), all_matches.end());
+
+            if (all_matches.empty()) continue;
 
             sig_count++;
-            RecoverableFile file{};
-            if (try_recover_file(reader, cur_sector, *match_result, file)) {
+
+            // ── Multi-format parallel recovery ──
+            auto recovered_files = try_recover_all_formats(reader, cur_sector, all_matches);
+
+            for (auto& file : recovered_files) {
                 progress.files_found.fetch_add(1, std::memory_order_relaxed);
 
                 uint64_t file_end = cur_sector;
                 for (const auto& frag : file.fragments) {
                     file_end = (std::max)(file_end, frag.start_sector + frag.sector_count);
                 }
-                claimed_end_sector = file_end;
+
+                // Use max file end across all recovered formats
+                if (file_end > claimed_end_sector) {
+                    claimed_end_sector = file_end;
+                }
 
                 if (sig_count <= 10) {
-                    LOG_FMT(L"[SigScanner] Found #%u: %s at sector %llu, size=%llu",
-                             sig_count, desc->description, cur_sector, file.file_size);
+                    const auto* desc = all_matches[file.candidate_index].descriptor;
+                    LOG_FMT(L"[SigScanner] Found #%u: %s at sector %llu, size=%llu, candidates=%u",
+                             sig_count, desc->description, cur_sector, file.file_size,
+                             file.total_candidates);
                 }
+
                 if (file.file_type == FileType::Video) {
                     video_files.push_back(std::move(file));
 
@@ -750,6 +766,52 @@ bool SignatureScanner::try_recover_file(ReaderType& reader, uint64_t start_secto
     file.corruption_level = assess_corruption(match_result.result, header_ok, footer_found);
 
     return true;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Template implementation: try_recover_all_formats()
+// ════════════════════════════════════════════════════════════════
+
+template<typename ReaderType>
+std::vector<RecoverableFile> SignatureScanner::try_recover_all_formats(
+    ReaderType& reader, uint64_t start_sector,
+    const std::vector<FormatRegistry::MatchResult>& candidates) {
+
+    std::vector<RecoverableFile> recovered_files;
+    if (candidates.empty()) return recovered_files;
+
+    const uint32_t sector_size = reader.sector_size();
+
+    // Shared header buffer for all candidates (avoid repeated reads)
+    const uint32_t HEADER_SECTORS = 4;
+    AlignedBuffer headerBuf(HEADER_SECTORS * sector_size, sector_size);
+    bool header_ok = reader.read_sectors_checked(start_sector, HEADER_SECTORS, headerBuf);
+
+    // Track the primary candidate (highest confidence = first in sorted list)
+    size_t total_candidates_size = (std::min)(candidates.size(), static_cast<size_t>(255));
+    uint8_t total_candidates = static_cast<uint8_t>(total_candidates_size);
+
+    for (uint8_t idx = 0; idx < total_candidates; ++idx) {
+        const auto& candidate = candidates[idx];
+
+        // Quick prune: skip low-confidence candidates
+        // Only perform full recovery for AcceptStructure and above
+        if (candidate.result < ValidateResult::AcceptStructure) {
+            continue;
+        }
+
+        RecoverableFile file;
+        // Call try_recover_file logic with shared header buffer
+        if (try_recover_file(reader, start_sector, candidate, file)) {
+            // Mark multi-format metadata
+            file.candidate_index = idx;
+            file.total_candidates = total_candidates;
+            file.is_primary_candidate = (idx == 0);
+            recovered_files.push_back(std::move(file));
+        }
+    }
+
+    return recovered_files;
 }
 
 } // namespace disk_recover
