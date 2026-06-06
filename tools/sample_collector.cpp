@@ -5,7 +5,7 @@
 #include <map>
 #include <set>
 #include <algorithm>
-#include <cstring>
+#include <fstream>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -37,6 +37,61 @@ struct FormatInfo {
 
 // Global state
 std::map<std::string, FormatInfo> g_formats;
+
+// Format list to scan (extension -> format info)
+void init_format_list(const Config& cfg) {
+    // Image formats
+    g_formats["jpg"] = {"jpg", FileType::Image, "JPEG Image"};
+    g_formats["jpeg"] = {"jpg", FileType::Image, "JPEG Image"};  // jpeg ext maps to jpg
+    g_formats["png"] = {"png", FileType::Image, "PNG Image"};
+    g_formats["gif"] = {"gif", FileType::Image, "GIF Image"};
+    g_formats["bmp"] = {"bmp", FileType::Image, "BMP Image"};
+    g_formats["tiff"] = {"tiff", FileType::Image, "TIFF Image"};
+    g_formats["tif"] = {"tiff", FileType::Image, "TIFF Image"};
+    g_formats["webp"] = {"webp", FileType::Image, "WebP Image"};
+    g_formats["heic"] = {"heic", FileType::Image, "HEIC Image"};
+    g_formats["heif"] = {"heic", FileType::Image, "HEIF Image"};
+    g_formats["orf"] = {"orf", FileType::Image, "Olympus RAW"};
+
+    // Video formats
+    g_formats["mp4"] = {"mp4", FileType::Video, "MP4 Video"};
+    g_formats["mov"] = {"mp4", FileType::Video, "QuickTime Movie"};
+    g_formats["avi"] = {"avi", FileType::Video, "AVI Video"};
+    g_formats["mkv"] = {"mkv", FileType::Video, "Matroska Video"};
+    g_formats["webm"] = {"mkv", FileType::Video, "WebM Video"};
+    g_formats["flv"] = {"flv", FileType::Video, "Flash Video"};
+    g_formats["mts"] = {"mts", FileType::Video, "MPEG Transport Stream"};
+    g_formats["m2ts"] = {"mts", FileType::Video, "MPEG Transport Stream"};
+    g_formats["wmv"] = {"wmv", FileType::Video, "Windows Media Video"};
+
+    // Audio formats
+    g_formats["mp3"] = {"mp3", FileType::Audio, "MP3 Audio"};
+    g_formats["flac"] = {"flac", FileType::Audio, "FLAC Audio"};
+    g_formats["wav"] = {"wav", FileType::Audio, "WAV Audio"};
+    g_formats["m4a"] = {"m4a", FileType::Audio, "M4A Audio"};
+
+    // Document formats
+    g_formats["pdf"] = {"pdf", FileType::Document, "PDF Document"};
+    g_formats["doc"] = {"doc", FileType::Document, "Word Document"};
+    g_formats["xls"] = {"doc", FileType::Document, "Excel Document"};
+    g_formats["ppt"] = {"doc", FileType::Document, "PowerPoint Document"};
+
+    // Archive formats
+    g_formats["zip"] = {"zip", FileType::Archive, "ZIP Archive"};
+    g_formats["7z"] = {"7z", FileType::Archive, "7-Zip Archive"};
+    g_formats["rar"] = {"rar", FileType::Archive, "RAR Archive"};
+
+    // If specific formats requested, filter list
+    if (!cfg.specific_formats.empty()) {
+        std::map<std::string, FormatInfo> filtered;
+        for (const auto& [ext, info] : g_formats) {
+            if (cfg.specific_formats.count(ext) || cfg.specific_formats.count(info.extension)) {
+                filtered[ext] = info;
+            }
+        }
+        g_formats = std::move(filtered);
+    }
+}
 
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [options]\n\n"
@@ -105,7 +160,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Max size: " << cfg.max_file_size_mb << " MB\n";
     std::cout << "Samples per format: " << cfg.samples_per_format << "\n";
 
-    // TODO: Initialize format list
+    // Initialize format list
+    init_format_list(cfg);
+    std::cout << "Tracking " << g_formats.size() << " format extensions\n";
+
     // TODO: Scan drives
     // TODO: Copy files
     // TODO: Generate report
