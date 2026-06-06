@@ -38,6 +38,27 @@ struct FormatInfo {
 // Global state
 std::map<std::string, FormatInfo> g_formats;
 
+// Directories to exclude from scanning
+const std::set<std::string> EXCLUDED_DIRS = {
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "$RECYCLE.BIN",
+    "Recovery",
+    "boot",
+    "efi",
+    ".git",
+    "node_modules",
+    ".cache",
+    "Thumbs.db",
+    "pagefile.sys",
+    "hiberfil.sys",
+    "swapfile.sys"
+};
+
 // Format list to scan (extension -> format info)
 void init_format_list(const Config& cfg) {
     // Image formats
@@ -91,6 +112,106 @@ void init_format_list(const Config& cfg) {
         }
         g_formats = std::move(filtered);
     }
+}
+
+bool should_skip_dir(const fs::path& path) {
+    std::string name = path.filename().string();
+    // Skip hidden directories (starting with .)
+    if (!name.empty() && name[0] == '.') return true;
+    // Skip excluded list
+    return EXCLUDED_DIRS.count(name) > 0;
+}
+
+bool should_skip_entry(const fs::directory_entry& entry) {
+    // Skip symlinks
+    if (entry.is_symlink()) return true;
+    // Skip temporary files
+    std::string name = entry.path().filename().string();
+    if (name.find('~') != std::string::npos) return true;
+    if (name.size() > 4 && name.substr(name.size() - 4) == ".tmp") return true;
+    return false;
+}
+
+void scan_directory(const fs::path& root, const Config& cfg, size_t& total_scanned) {
+    if (!fs::exists(root)) {
+        if (cfg.verbose) std::cout << "  Skipping non-existent: " << root << "\n";
+        return;
+    }
+
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+         it != fs::recursive_directory_iterator();
+         ++it) {
+        try {
+            const auto& entry = *it;
+
+            if (should_skip_entry(entry)) {
+                continue;
+            }
+
+            if (entry.is_directory()) {
+                if (should_skip_dir(entry.path())) {
+                    if (cfg.verbose) std::cout << "  Skipping dir: " << entry.path() << "\n";
+                    it.disable_recursion_pending();
+                }
+                continue;
+            }
+
+            if (!entry.is_regular_file()) continue;
+
+            total_scanned++;
+
+            // Check extension
+            std::string ext = entry.path().extension().string();
+            if (ext.empty()) continue;
+
+            // Remove dot and convert to lowercase
+            ext = ext.substr(1);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+            // Find format
+            auto fit = g_formats.find(ext);
+            if (fit == g_formats.end()) continue;
+
+            // Check file size
+            uint64_t file_size = entry.file_size();
+            if (file_size > cfg.max_file_size_mb * 1024 * 1024) continue;
+            if (file_size == 0) continue;
+
+            // Get target extension (handle aliases like jpeg->jpg)
+            std::string target_ext = fit->second.extension;
+            auto& files = g_formats[target_ext].found_files;
+
+            // Check if already collected enough samples
+            if (files.size() >= cfg.samples_per_format) continue;
+
+            // Avoid duplicate files
+            if (std::find(files.begin(), files.end(), entry.path()) != files.end()) continue;
+
+            files.push_back(entry.path());
+            if (cfg.verbose) {
+                std::cout << "  Found [" << target_ext << "]: " << entry.path()
+                          << " (" << file_size / 1024 << " KB)\n";
+            }
+
+        } catch (const std::exception& e) {
+            if (cfg.verbose) {
+                std::cout << "  Error: " << e.what() << "\n";
+            }
+        }
+    }
+}
+
+void scan_drives(const Config& cfg) {
+    size_t total_scanned = 0;
+
+    for (const auto& drive : cfg.drives) {
+        fs::path root(drive + ":\\");
+        std::cout << "\nScanning " << root << "...\n";
+        scan_directory(root, cfg, total_scanned);
+    }
+
+    std::cout << "\nTotal files scanned: " << total_scanned << "\n";
 }
 
 void print_usage(const char* program) {
@@ -164,7 +285,9 @@ int main(int argc, char* argv[]) {
     init_format_list(cfg);
     std::cout << "Tracking " << g_formats.size() << " format extensions\n";
 
-    // TODO: Scan drives
+    // Scan drives
+    scan_drives(cfg);
+
     // TODO: Copy files
     // TODO: Generate report
 
