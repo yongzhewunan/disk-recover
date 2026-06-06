@@ -287,6 +287,57 @@ void copy_files(const Config& cfg) {
     }
 }
 
+void generate_report(const Config& cfg) {
+    fs::path report_path = cfg.output_dir / "collection_report.txt";
+
+    std::ofstream report(report_path);
+    if (!report) {
+        std::cerr << "Error: Could not create report file\n";
+        return;
+    }
+
+    report << "Sample Collection Report\n";
+    report << "========================\n\n";
+
+    report << "Configuration:\n";
+    report << "  Drives: ";
+    for (const auto& d : cfg.drives) report << d << ": ";
+    report << "\n";
+    report << "  Max file size: " << cfg.max_file_size_mb << " MB\n";
+    report << "  Samples per format: " << cfg.samples_per_format << "\n\n";
+
+    report << "Results:\n";
+    report << "--------\n\n";
+
+    size_t formats_found = 0;
+    size_t formats_missing = 0;
+
+    for (const auto& [ext, info] : g_formats) {
+        if (ext != info.extension) continue;  // Skip aliases
+
+        report << "[" << ext << "] " << info.description << "\n";
+
+        if (info.found_files.empty()) {
+            report << "  Status: NO SAMPLES FOUND\n";
+            formats_missing++;
+        } else {
+            report << "  Status: Found " << info.found_files.size() << " files\n";
+            for (const auto& f : info.found_files) {
+                report << "  - " << f.filename() << "\n";
+            }
+            formats_found++;
+        }
+        report << "\n";
+    }
+
+    report << "Summary:\n";
+    report << "  Formats with samples: " << formats_found << "\n";
+    report << "  Formats missing: " << formats_missing << "\n";
+
+    report.close();
+    std::cout << "\nReport saved to: " << report_path << "\n";
+}
+
 void print_usage(const char* program) {
     std::cout << "Usage: " << program << " [options]\n\n"
               << "Options:\n"
@@ -364,7 +415,8 @@ int main(int argc, char* argv[]) {
     // Copy files
     copy_files(cfg);
 
-    // TODO: Generate report
+    // Generate report
+    generate_report(cfg);
 
     std::cout << "\nDone.\n";
     return 0;
