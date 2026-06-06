@@ -10,6 +10,7 @@ add_executable(disk_recover_tests
     exfat_test.cpp
     scan_cache_db_test.cpp
     recover_manager_test.cpp
+    real_file_validation_test.cpp
 )
 target_link_libraries(disk_recover_tests PRIVATE
     disk_recover_business
