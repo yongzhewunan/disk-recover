@@ -3,6 +3,8 @@
 #include "validation.hpp"
 #include "format_descriptor.hpp"
 #include "types.hpp"
+#include <fstream>
+#include <vector>
 
 using namespace disk_recover;
 
@@ -338,4 +340,118 @@ TEST(FileTypeTest, AllTypesExist) {
     EXPECT_EQ(static_cast<uint8_t>(FileType::Audio), 3u);
     EXPECT_EQ(static_cast<uint8_t>(FileType::Document), 4u);
     EXPECT_EQ(static_cast<uint8_t>(FileType::Archive), 5u);
+}
+
+// ════════════════════════════════════════════════════════════════
+// Real File Validation Tests
+// ════════════════════════════════════════════════════════════════
+
+// Helper function to read file content
+static std::vector<uint8_t> read_file_content(const char* filename) {
+    std::string path = "tests/data/";
+    path += filename;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return {};
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(size);
+    file.read(reinterpret_cast<char*>(data.data()), size);
+    return data;
+}
+
+TEST(RealFileTest, ValidatePngFiles) {
+    // Test PNG files from tests/data/
+    const char* png_files[] = {"newplot.png", "test2_2024-06-07.png", "icon.png"};
+
+    for (const char* filename : png_files) {
+        auto data = read_file_content(filename);
+        ASSERT_FALSE(data.empty()) << "Failed to read " << filename;
+
+        // Validate header
+        auto match = FormatRegistry::instance().match(data.data(), data.size());
+        ASSERT_TRUE(match.has_value()) << "No match for " << filename;
+
+        // PNG should match with at least AcceptStructure
+        EXPECT_NE(match->result, ValidateResult::Reject) << "PNG rejected: " << filename;
+        EXPECT_EQ(match->descriptor->file_type, FileType::Image);
+        EXPECT_STREQ(match->descriptor->extension, L"png");
+    }
+}
+
+TEST(RealFileTest, ValidateJpgFiles) {
+    // Test JPG files from tests/data/
+    const char* jpg_files[] = {"AI.jpg", "qjf.jpg"};
+
+    for (const char* filename : jpg_files) {
+        auto data = read_file_content(filename);
+        ASSERT_FALSE(data.empty()) << "Failed to read " << filename;
+
+        // Validate header
+        auto match = FormatRegistry::instance().match(data.data(), data.size());
+        ASSERT_TRUE(match.has_value()) << "No match for " << filename;
+        EXPECT_NE(match->result, ValidateResult::Reject) << "JPG rejected: " << filename;
+        EXPECT_EQ(match->descriptor->file_type, FileType::Image);
+    }
+}
+
+TEST(RealFileTest, PngSignatureAndStructure) {
+    // Test PNG signature validation
+    auto data = read_file_content("newplot.png");
+    ASSERT_FALSE(data.empty()) << "Failed to read newplot.png";
+
+    // Verify PNG signature
+    EXPECT_EQ(data[0], 0x89);
+    EXPECT_EQ(data[1], 0x50);
+    EXPECT_EQ(data[2], 0x4E);
+    EXPECT_EQ(data[3], 0x47);
+    EXPECT_EQ(data[4], 0x0D);
+    EXPECT_EQ(data[5], 0x0A);
+    EXPECT_EQ(data[6], 0x1A);
+    EXPECT_EQ(data[7], 0x0A);
+
+    // IHDR should follow signature
+    // Chunk length (13 bytes for IHDR)
+    uint32_t ihdr_len = (data[8] << 24) | (data[9] << 16) | (data[10] << 8) | data[11];
+    EXPECT_EQ(ihdr_len, 13u);
+
+    // IHDR type
+    EXPECT_EQ(data[12], 'I');
+    EXPECT_EQ(data[13], 'H');
+    EXPECT_EQ(data[14], 'D');
+    EXPECT_EQ(data[15], 'R');
+}
+
+TEST(RealFileTest, ValidateMp4File) {
+    auto data = read_file_content("Reset_position.mp4");
+    ASSERT_FALSE(data.empty()) << "Failed to read Reset_position.mp4";
+
+    auto match = FormatRegistry::instance().match(data.data(), data.size());
+    ASSERT_TRUE(match.has_value()) << "No match for MP4 file";
+    EXPECT_NE(match->result, ValidateResult::Reject);
+    EXPECT_EQ(match->descriptor->file_type, FileType::Video);
+
+    // Verify MP4/BMFF signature - ftyp atom at offset 4
+    // First 4 bytes are atom size
+    EXPECT_EQ(data[4], 'f');
+    EXPECT_EQ(data[5], 't');
+    EXPECT_EQ(data[6], 'y');
+    EXPECT_EQ(data[7], 'p');
+}
+
+TEST(RealFileTest, ValidateZipFile) {
+    auto data = read_file_content("annotations.zip");
+    ASSERT_FALSE(data.empty()) << "Failed to read annotations.zip";
+
+    auto match = FormatRegistry::instance().match(data.data(), data.size());
+    ASSERT_TRUE(match.has_value()) << "No match for ZIP file";
+    EXPECT_NE(match->result, ValidateResult::Reject);
+    EXPECT_EQ(match->descriptor->file_type, FileType::Archive);
+    EXPECT_STREQ(match->descriptor->extension, L"zip");
+
+    // Verify ZIP signature: PK\x03\x04
+    EXPECT_EQ(data[0], 0x50);
+    EXPECT_EQ(data[1], 0x4B);
+    EXPECT_EQ(data[2], 0x03);
+    EXPECT_EQ(data[3], 0x04);
 }

@@ -32,6 +32,8 @@ static bool verify_png_chunk_crc(const uint8_t* chunk_start, uint32_t data_lengt
 // ── Phase 1: Header check ──
 // Validates PNG signature + IHDR chunk (must be first chunk).
 // Returns AcceptStructure if IHDR is valid, AcceptVerified if IEND is also found.
+// NOTE: CRC validation is skipped during header_check to allow recovery of
+// partially corrupted PNG files. CRC is only validated in file_check.
 ValidateResult check_png_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     if (length < PNG_SIGNATURE_SIZE) return ValidateResult::Reject;
 
@@ -128,9 +130,8 @@ ValidateResult check_png_header_impl(const uint8_t* data, size_t length, uint64_
             if (filter != 0) return ValidateResult::Reject;
             if (interlace != 0 && interlace != 1) return ValidateResult::Reject;
 
-            // Verify IHDR CRC
-            if (!verify_png_chunk_crc(data + pos, data_length))
-                return ValidateResult::Reject;
+            // Skip CRC validation during header_check - allow recovery of corrupted files
+            // CRC will be validated in file_check if full file is available
 
             found_ihdr = true;
             pos += total_chunk_size;
@@ -141,9 +142,7 @@ ValidateResult check_png_header_impl(const uint8_t* data, size_t length, uint64_
         if (t0 == 'I' && t1 == 'E' && t2 == 'N' && t3 == 'D') {
             if (data_length != 0) return ValidateResult::Reject;
 
-            // Verify IEND CRC
-            if (!verify_png_chunk_crc(data + pos, data_length))
-                return ValidateResult::Reject;
+            // Skip CRC validation during header_check
 
             calculated_file_size = pos + total_chunk_size;
             found_iend = true;
