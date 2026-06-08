@@ -60,7 +60,7 @@ void register_all_formats(FormatRegistry& registry) {
 
     // Document formats
     registry.register_format(PDF_DESCRIPTOR);
-    // registry.register_format(DOC_DESCRIPTOR);  // Temporarily disabled
+    registry.register_format(DOC_DESCRIPTOR);
 
     // Archive formats
     registry.register_format(ZIP_DESCRIPTOR);
