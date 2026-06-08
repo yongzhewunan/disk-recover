@@ -8,7 +8,11 @@ namespace {
 // MP3 signature: MPEG audio frame sync
 // First byte is always 0xFF, second byte has bits 7-5 = 111 (0xE0 mask)
 // Common patterns: 0xFF 0xFB (MPEG1 Layer3), 0xFF 0xF3 (MPEG2 Layer3), 0xFF 0xF2 (MPEG2.5 Layer3)
-static const uint8_t MP3_MAGIC[] = {0xFF, 0xE0};  // Mask: sync + minimum version/layer bits
+static const uint8_t MP3_MAGIC[] = {0xFF, 0xE0};  // Pattern: sync + minimum version/layer bits
+static const uint8_t MP3_MASK[] = {0xFF, 0xE0};   // Mask: only check sync word bits
+
+// ID3v2 tag header: "ID3" followed by version (2 bytes) and flags
+static const uint8_t ID3_MAGIC[] = {0x49, 0x44, 0x33};  // "ID3"
 
 // ============================================================================
 // MP3 Three-Phase Validator
@@ -223,12 +227,58 @@ static uint64_t check_xing_header(const uint8_t* data, size_t length, size_t fra
     return 0;
 }
 
+// ── Skip ID3v2 tag if present ──
+// Returns the offset past the ID3 tag, or 0 if no ID3 tag.
+static size_t skip_id3_tag(const uint8_t* data, size_t length) {
+    if (length < 10) return 0;
+    if (data[0] != 0x49 || data[1] != 0x44 || data[2] != 0x33) return 0;  // Not "ID3"
+
+    // ID3v2 header: "ID3" (3), version (2), flags (1), size (4 syncsafe int)
+    uint8_t flags = data[5];
+
+    // Size is stored as 4-byte syncsafe integer (each byte < 128)
+    size_t id3_size = ((data[6] & 0x7F) << 21) |
+                      ((data[7] & 0x7F) << 14) |
+                      ((data[8] & 0x7F) << 7) |
+                       (data[9] & 0x7F);
+
+    // Total tag size = 10 (header) + id3_size
+    size_t total = 10 + id3_size;
+
+    // If footer bit is set (flags bit 4), add 10 more bytes
+    if (flags & 0x10) total += 10;
+
+    // Sanity check: ID3 tags shouldn't be > 1MB
+    if (total > 1024 * 1024) return 0;
+
+    return total;
+}
+
 // ── Phase 1: Header check ──
 ValidateResult check_mp3_header_impl(const uint8_t* data, size_t length, uint64_t& calculated_file_size) {
     if (length < 4) return ValidateResult::Reject;
 
+    // Skip ID3v2 tag if present — many MP3 files start with ID3 metadata
+    size_t frame_offset = skip_id3_tag(data, length);
+    if (frame_offset > 0 && frame_offset + 4 > length) {
+        // ID3 tag takes up entire buffer — can't check first frame
+        // Still accept as MP3 since we confirmed ID3 header
+        calculated_file_size = 0;
+        return ValidateResult::AcceptHeader;
+    }
+
+    // If no ID3 tag, frame_offset is 0 — check sync word directly
+    // (the masked signature already verified 0xFF 0xE0 match)
     FrameInfo first_frame;
-    if (!parse_mpeg_frame(data, length, 0, first_frame)) return ValidateResult::Reject;
+    if (!parse_mpeg_frame(data, length, frame_offset, first_frame)) {
+        // If we have an ID3 tag but can't parse the first frame,
+        // still accept as MP3 (ID3 is definitive for MP3)
+        if (frame_offset > 0) {
+            calculated_file_size = 0;
+            return ValidateResult::AcceptHeader;
+        }
+        return ValidateResult::Reject;
+    }
 
     calculated_file_size = 0;  // Size unknown from single frame
     return ValidateResult::AcceptHeader;
@@ -245,18 +295,26 @@ ValidateResult check_mp3_data_impl(const uint8_t* data, size_t length, uint64_t 
     int consistent_frames = 0;
 
     if (offset_in_file == 0) {
-        // Parse first frame
-        if (!parse_mpeg_frame(data, length, 0, first_frame)) return ValidateResult::Reject;
+        // Skip ID3v2 tag if present
+        size_t id3_skip = skip_id3_tag(data, length);
+
+        // Parse first frame (after ID3 tag if present)
+        if (!parse_mpeg_frame(data, length, id3_skip, first_frame)) {
+            // If we have an ID3 tag, accept as MP3 even without valid first frame
+            // (ID3 is definitive for MP3 classification)
+            if (id3_skip > 0) return ValidateResult::AcceptHeader;
+            return ValidateResult::Reject;
+        }
         consistent_frames = 1;
 
         // Check for XING/VBRI header
-        uint64_t xing_size = check_xing_header(data, length, 0, first_frame);
+        uint64_t xing_size = check_xing_header(data, length, id3_skip, first_frame);
         if (xing_size > 0) {
             calculated_file_size = xing_size;
             return ValidateResult::AcceptVerified;
         }
 
-        pos = first_frame.frame_size;
+        pos = id3_skip + first_frame.frame_size;
     } else {
         // For subsequent blocks, try to find a valid frame
         // Scan for sync word
@@ -306,7 +364,7 @@ const FormatDescriptor MP3_DESCRIPTOR = {
     .description     = L"MP3 audio",
     .min_filesize    = 128,
     .max_filesize    = 0,
-    .signature       = {MP3_MAGIC, 2, 0},
+    .signature       = {MP3_MAGIC, MP3_MASK, 2, 0, 0x49},  // 0x49 = 'I' for ID3 tag
     .header_check    = check_mp3_header_impl,
     .data_check      = check_mp3_data_impl,
     .file_check      = nullptr,

@@ -42,6 +42,12 @@ void FormatRegistry::build_index() {
             // Pattern at offset 0: index by first byte of pattern
             uint8_t first_byte = fmt.signature.pattern[0];
             first_byte_index_[first_byte].push_back(&fmt);
+
+            // Also index by alternative first byte if specified (e.g., ID3 tag for MP3)
+            if (fmt.signature.alt_first_byte != 0 &&
+                fmt.signature.alt_first_byte != first_byte) {
+                first_byte_index_[fmt.signature.alt_first_byte].push_back(&fmt);
+            }
         } else {
             // Pattern at non-zero offset: add to offset_signatures_ for secondary probing
             offset_signatures_.push_back(&fmt);
@@ -77,12 +83,36 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
 
     for (const auto* fmt : candidates) {
         // Quick signature match check before calling header_check
-        if (fmt->signature.offset == 0 &&
+        // If we reached this format via alt_first_byte (data[0] != pattern[0]),
+        // skip the signature pattern check and let header_check validate instead.
+        bool via_alt_byte = (fmt->signature.offset == 0 &&
+                             fmt->signature.pattern_len > 0 &&
+                             data[0] != fmt->signature.pattern[0]);
+
+        if (!via_alt_byte &&
+            fmt->signature.offset == 0 &&
             fmt->signature.pattern_len > 0 &&
             length >= fmt->signature.pattern_len) {
-            if (std::memcmp(data, fmt->signature.pattern, fmt->signature.pattern_len) != 0) {
-                continue;  // Signature doesn't match, skip
+            if (fmt->signature.mask) {
+                // Masked signature match: (data[i] & mask[i]) == pattern[i]
+                bool match = true;
+                for (uint8_t i = 0; i < fmt->signature.pattern_len; ++i) {
+                    if ((data[i] & fmt->signature.mask[i]) != fmt->signature.pattern[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            } else {
+                if (std::memcmp(data, fmt->signature.pattern, fmt->signature.pattern_len) != 0) {
+                    continue;  // Signature doesn't match, skip
+                }
             }
+        } else if (!via_alt_byte &&
+                   fmt->signature.offset == 0 &&
+                   fmt->signature.pattern_len > 0 &&
+                   length < fmt->signature.pattern_len) {
+            continue;  // Not enough data for signature check
         }
 
         // Run header_check
@@ -110,10 +140,22 @@ std::optional<FormatRegistry::MatchResult> FormatRegistry::match(const uint8_t* 
         if (fmt->signature.offset > 0 &&
             fmt->signature.pattern_len > 0 &&
             length >= static_cast<size_t>(fmt->signature.offset + fmt->signature.pattern_len)) {
-            if (std::memcmp(data + fmt->signature.offset,
-                            fmt->signature.pattern,
-                            fmt->signature.pattern_len) != 0) {
-                continue;  // Signature doesn't match
+            if (fmt->signature.mask) {
+                // Masked signature match at offset
+                bool match = true;
+                for (uint8_t i = 0; i < fmt->signature.pattern_len; ++i) {
+                    if ((data[fmt->signature.offset + i] & fmt->signature.mask[i]) != fmt->signature.pattern[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            } else {
+                if (std::memcmp(data + fmt->signature.offset,
+                                fmt->signature.pattern,
+                                fmt->signature.pattern_len) != 0) {
+                    continue;  // Signature doesn't match
+                }
             }
         } else {
             continue;  // Not enough data to check signature
@@ -156,12 +198,36 @@ std::vector<FormatRegistry::MatchResult> FormatRegistry::match_all(const uint8_t
 
     for (const auto* fmt : candidates) {
         // Quick signature match check before calling header_check
-        if (fmt->signature.offset == 0 &&
+        // If we reached this format via alt_first_byte (data[0] != pattern[0]),
+        // skip the signature pattern check and let header_check validate instead.
+        bool via_alt_byte = (fmt->signature.offset == 0 &&
+                             fmt->signature.pattern_len > 0 &&
+                             data[0] != fmt->signature.pattern[0]);
+
+        if (!via_alt_byte &&
+            fmt->signature.offset == 0 &&
             fmt->signature.pattern_len > 0 &&
             length >= fmt->signature.pattern_len) {
-            if (std::memcmp(data, fmt->signature.pattern, fmt->signature.pattern_len) != 0) {
-                continue;  // Signature doesn't match, skip
+            if (fmt->signature.mask) {
+                // Masked signature match: (data[i] & mask[i]) == pattern[i]
+                bool match = true;
+                for (uint8_t i = 0; i < fmt->signature.pattern_len; ++i) {
+                    if ((data[i] & fmt->signature.mask[i]) != fmt->signature.pattern[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            } else {
+                if (std::memcmp(data, fmt->signature.pattern, fmt->signature.pattern_len) != 0) {
+                    continue;  // Signature doesn't match, skip
+                }
             }
+        } else if (!via_alt_byte &&
+                   fmt->signature.offset == 0 &&
+                   fmt->signature.pattern_len > 0 &&
+                   length < fmt->signature.pattern_len) {
+            continue;  // Not enough data for signature check
         }
 
         // Run header_check
@@ -179,10 +245,22 @@ std::vector<FormatRegistry::MatchResult> FormatRegistry::match_all(const uint8_t
         if (fmt->signature.offset > 0 &&
             fmt->signature.pattern_len > 0 &&
             length >= static_cast<size_t>(fmt->signature.offset + fmt->signature.pattern_len)) {
-            if (std::memcmp(data + fmt->signature.offset,
-                            fmt->signature.pattern,
-                            fmt->signature.pattern_len) != 0) {
-                continue;  // Signature doesn't match
+            if (fmt->signature.mask) {
+                // Masked signature match at offset
+                bool match = true;
+                for (uint8_t i = 0; i < fmt->signature.pattern_len; ++i) {
+                    if ((data[fmt->signature.offset + i] & fmt->signature.mask[i]) != fmt->signature.pattern[i]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (!match) continue;
+            } else {
+                if (std::memcmp(data + fmt->signature.offset,
+                                fmt->signature.pattern,
+                                fmt->signature.pattern_len) != 0) {
+                    continue;  // Signature doesn't match
+                }
             }
         } else {
             continue;  // Not enough data to check signature

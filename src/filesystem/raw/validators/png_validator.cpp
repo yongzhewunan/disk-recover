@@ -317,7 +317,7 @@ const FormatDescriptor PNG_DESCRIPTOR = {
     .description     = L"PNG image",
     .min_filesize    = 33,  // 8 (sig) + 25 (IHDR) = 33
     .max_filesize    = 0,
-    .signature       = {PNG_MAGIC, 8, 0},
+    .signature       = {PNG_MAGIC, nullptr, 8, 0, 0},
     .header_check    = check_png_header_impl,
     .data_check      = check_png_data_impl,
     .file_check      = check_png_file_impl,

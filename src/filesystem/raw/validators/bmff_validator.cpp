@@ -43,6 +43,67 @@ static size_t find_ftyp_pos(const uint8_t* data, size_t length) {
     return SIZE_MAX;
 }
 
+// Common helper: check compatible_brands for audio brands
+// The ftyp box contains: major_brand (4), minor_version (4), compatible_brands[] (4 each)
+static bool has_audio_brand(const uint8_t* data, size_t length, size_t ftyp_pos, uint32_t ftyp_box_size) {
+    // First check major brand
+    const uint8_t* brand_ptr = data + ftyp_pos + 8;
+    auto brand_entry = lookup_brand(brand_ptr);
+    if (brand_entry && brand_entry->file_type == FileType::Audio) return true;
+
+    // Then check compatible_brands (after major_brand + minor_version = offset 16)
+    // Compatible brands start at ftyp_pos + 16 and continue to end of ftyp box
+    size_t brands_start = ftyp_pos + 16;
+    size_t brands_end = ftyp_pos + ftyp_box_size;
+
+    for (size_t i = brands_start; i + 4 <= brands_end && i + 4 <= length; i += 4) {
+        auto compat_entry = lookup_brand(data + i);
+        if (compat_entry && compat_entry->file_type == FileType::Audio) return true;
+    }
+
+    return false;
+}
+
+// Common helper: check for audio handler type in moov box
+// If moov contains a "soun" (sound) handler, it's an audio file
+static bool has_soun_handler(const uint8_t* data, size_t length, size_t ftyp_pos, uint32_t ftyp_box_size) {
+    if (ftyp_box_size > length - ftyp_pos) return false;
+    size_t search_start = ftyp_pos + ftyp_box_size;
+
+    // Search for "soun" handler type anywhere in the data after ftyp
+    // We search byte-by-byte for "hdlr" first, then check the handler_type field
+    // hdlr box: [size(4)] ["hdlr"(4)] [version(1)] [flags(3)] [pre_defined(4)] [handler_type(4)]
+    for (size_t i = search_start; i + 20 <= length; i++) {
+        if (has_str(data, length, i + 4, "hdlr")) {
+            // handler_type is at: box_start + 4(size) + 4(type) + 4(ver+flags) + 4(pre_defined) = box_start + 16
+            // But box_start is i, and type "hdlr" is at i+4, so handler_type is at i + 16
+            size_t handler_offset = i + 4 + 4 + 4 + 4;
+            if (handler_offset + 4 <= length && has_str(data, length, handler_offset, "soun")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Common helper: check for video handler type in moov box
+// If moov contains a "vide" (video) handler, it's a video file
+static bool has_vide_handler(const uint8_t* data, size_t length, size_t ftyp_pos, uint32_t ftyp_box_size) {
+    if (ftyp_box_size > length - ftyp_pos) return false;
+    size_t search_start = ftyp_pos + ftyp_box_size;
+
+    // Same logic as has_soun_handler, but looking for "vide"
+    for (size_t i = search_start; i + 20 <= length; i++) {
+        if (has_str(data, length, i + 4, "hdlr")) {
+            size_t handler_offset = i + 4 + 4 + 4 + 4;
+            if (handler_offset + 4 <= length && has_str(data, length, handler_offset, "vide")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Common helper: check for moov box after ftyp
 static bool has_moov_box(const uint8_t* data, size_t length, size_t ftyp_pos, uint32_t ftyp_box_size) {
     if (ftyp_box_size > length - ftyp_pos) return false;
@@ -101,6 +162,18 @@ ValidateResult check_bmff_video_header_impl(const uint8_t* data, size_t length, 
     uint32_t box_size = read_be32(data + ftyp_pos);
     if (box_size < 12) return ValidateResult::Reject;
 
+    // Reject if this is purely an audio file (has audio brands AND no video handler).
+    // Many MP4 files have both soun and vide handlers — those are video files.
+    bool has_soun = has_soun_handler(data, length, ftyp_pos, box_size);
+    bool has_vide = has_vide_handler(data, length, ftyp_pos, box_size);
+
+    // If both soun and vide handlers exist, it's a video file (MP4 with audio track).
+    // Only reject if it has soun but no vide (pure audio = M4A).
+    if (has_soun && !has_vide) return ValidateResult::Reject;
+
+    // Also reject if brand is explicitly Audio and there's no video handler
+    if (has_audio_brand(data, length, ftyp_pos, box_size) && !has_vide) return ValidateResult::Reject;
+
     const uint8_t* brand_ptr = data + ftyp_pos + 8;
     auto brand_entry = lookup_brand(brand_ptr);
 
@@ -135,11 +208,34 @@ ValidateResult check_bmff_audio_header_impl(const uint8_t* data, size_t length, 
     uint32_t box_size = read_be32(data + ftyp_pos);
     if (box_size < 12) return ValidateResult::Reject;
 
+    // Check if major brand is Audio type
     const uint8_t* brand_ptr = data + ftyp_pos + 8;
     auto brand_entry = lookup_brand(brand_ptr);
 
-    // Only accept if brand is an Audio type
-    if (!brand_entry || brand_entry->file_type != FileType::Audio) return ValidateResult::Reject;
+    // Check for handler types — if vide handler exists, this is a video file (MP4), not audio (M4A)
+    bool has_soun = has_soun_handler(data, length, ftyp_pos, box_size);
+    bool has_vide = has_vide_handler(data, length, ftyp_pos, box_size);
+
+    // If vide handler exists, reject — this should be classified as Video (MP4)
+    if (has_vide) return ValidateResult::Reject;
+
+    bool is_audio = false;
+    if (brand_entry && brand_entry->file_type == FileType::Audio) {
+        is_audio = true;
+    }
+
+    // Also check compatible_brands for audio brands (e.g., major=mp42 with M4A in compat)
+    if (!is_audio && has_audio_brand(data, length, ftyp_pos, box_size)) {
+        is_audio = true;
+    }
+
+    // Also check for "soun" handler in moov (definitive audio indicator)
+    // But only accept if there's no vide handler (pure audio file)
+    if (!is_audio && has_soun && !has_vide) {
+        is_audio = true;
+    }
+
+    if (!is_audio) return ValidateResult::Reject;
 
     if (has_moov_box(data, length, ftyp_pos, box_size)) {
         return ValidateResult::AcceptVerified;
@@ -224,7 +320,7 @@ const FormatDescriptor BMFF_IMAGE_DESCRIPTOR = {
     .description     = L"HEIC-AVIF (ISO BMFF Image)",
     .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
-    .signature       = {FTYP_MAGIC, 4, 4},
+    .signature       = {FTYP_MAGIC, nullptr, 4, 4, 0},
     .header_check    = check_bmff_image_header_impl,
     .data_check      = nullptr,
     .file_check      = check_bmff_file_impl,
@@ -237,7 +333,7 @@ const FormatDescriptor BMFF_VIDEO_DESCRIPTOR = {
     .description     = L"MP4-MOV (ISO BMFF Video)",
     .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
-    .signature       = {FTYP_MAGIC, 4, 4},
+    .signature       = {FTYP_MAGIC, nullptr, 4, 4, 0},
     .header_check    = check_bmff_video_header_impl,
     .data_check      = nullptr,
     .file_check      = check_bmff_file_impl,
@@ -250,7 +346,7 @@ const FormatDescriptor BMFF_AUDIO_DESCRIPTOR = {
     .description     = L"M4A (ISO BMFF Audio)",
     .min_filesize    = 32,  // ftyp box (12+) + at least one more box (20+)
     .max_filesize    = 0,
-    .signature       = {FTYP_MAGIC, 4, 4},
+    .signature       = {FTYP_MAGIC, nullptr, 4, 4, 0},
     .header_check    = check_bmff_audio_header_impl,
     .data_check      = nullptr,
     .file_check      = check_bmff_file_impl,

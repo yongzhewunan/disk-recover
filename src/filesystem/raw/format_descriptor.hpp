@@ -24,9 +24,12 @@ struct FormatDescriptor {
 
     // Signature pattern for first-byte index lookup.
     struct SignaturePattern {
-        const uint8_t* pattern;      // Magic byte pattern to match
-        uint8_t        pattern_len;  // Length of pattern in bytes
-        uint8_t        offset;       // Byte offset where pattern appears (0 = at start)
+        const uint8_t* pattern;          // Magic byte pattern to match
+        const uint8_t* mask;             // Bitwise AND mask for pattern matching (nullptr = exact match)
+        uint8_t        pattern_len;      // Length of pattern in bytes
+        uint8_t        offset;           // Byte offset where pattern appears (0 = at start)
+        uint8_t        alt_first_byte;   // Alternative first byte for index lookup (0 = none)
+                                      // Used for formats with multiple entry signatures (e.g., MP3 with ID3 tag)
     } signature;
 
     // Phase 1: Header check — called once per candidate sector.
